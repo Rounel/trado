@@ -44,6 +44,10 @@ class LSTMModel(nn.Module):
         out = self.dropout(out[:, -1, :])  # dernier pas de temps
         return self.fc(out)                # logits (batch, output_size)
 
+    def set_dropout(self, p: float) -> None:
+        """Ajuste le taux de dropout de la couche de sortie (la seule modifiable à chaud)."""
+        self.dropout.p = float(max(0.0, min(0.9, p)))
+
 
 class GRUModel(nn.Module):
     """GRU multi-couches — alternative légère au LSTM."""
@@ -71,3 +75,7 @@ class GRUModel(nn.Module):
         out, _ = self.gru(x)
         out = self.dropout(out[:, -1, :])
         return self.fc(out)
+
+    def set_dropout(self, p: float) -> None:
+        """Ajuste le taux de dropout de la couche de sortie."""
+        self.dropout.p = float(max(0.0, min(0.9, p)))

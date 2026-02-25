@@ -84,3 +84,10 @@ class TemporalFusionTransformer(nn.Module):
         x = x[:, -1, :]                  # Dernier pas de temps
         x = self.output_grn(x)
         return self.classifier(x)        # logits (batch, 3)
+
+    def set_dropout(self, p: float) -> None:
+        """Ajuste dynamiquement le taux de dropout de tous les modules Dropout du TFT."""
+        p = float(max(0.0, min(0.9, p)))
+        for module in self.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = p

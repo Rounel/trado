@@ -14,14 +14,15 @@ if TYPE_CHECKING:
 @dataclass
 class Signal:
     """Signal de trading émis par une stratégie."""
-    action:     str            # "BUY" | "SELL" | "HOLD"
-    symbol:     str
-    confidence: float          # [0, 1]
-    stop_loss:  float | None = None
+    action:      str            # "BUY" | "SELL" | "HOLD"
+    symbol:      str
+    confidence:  float          # [0, 1]
+    stop_loss:   float | None = None
     take_profit: float | None = None
-    size:       float | None = None   # taille de position (en unités ou % du capital)
-    strategy:   str | None = None
-    metadata:   dict = field(default_factory=dict)
+    size:        float | None = None   # taille de position (en unités de l'actif)
+    strategy:    str | None = None
+    entry_price: float | None = None   # prix d'entrée réel (renseigné par l'engine)
+    metadata:    dict = field(default_factory=dict)
 
     def is_actionable(self) -> bool:
         return self.action in ("BUY", "SELL")

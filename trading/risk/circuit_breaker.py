@@ -2,13 +2,14 @@
 trading/risk/circuit_breaker.py — Garde-fous contre les drawdowns et pertes consécutives.
 
 Déclencheurs :
-  - Drawdown > max_drawdown_pct → pause complète
-  - Perte journalière > max_daily_loss_pct → pause journée
-  - N pertes consécutives > seuil → pause temporaire
+  - Drawdown > max_drawdown_pct                              → pause complète
+  - Perte journalière > max_daily_loss_pct                   → pause journée
+  - N pertes consécutives > seuil                            → pause temporaire
+  - Trailing stop portefeuille (depuis pic intraday)         → pause journée
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -26,13 +27,19 @@ class CircuitBreaker:
         self.initial_capital    = settings.risk.capital_usd
         self.max_consecutive_losses = 5
 
-        self._peak_value       = self.initial_capital
-        self._current_value    = self.initial_capital
-        self._daily_start_value = self.initial_capital
-        self._daily_date       = date.today()
-        self._consecutive_losses = 0
-        self._paused            = False
-        self._pause_reason      = ""
+        # Trailing stop portefeuille
+        self._ptsl_stop_pct       = settings.risk.portfolio_trailing_stop_pct
+        self._ptsl_activation_pct = settings.risk.portfolio_trailing_activation_pct
+        self._ptsl_active         = False   # True une fois le gain d'activation atteint
+        self._intraday_peak       = self.initial_capital
+
+        self._peak_value          = self.initial_capital
+        self._current_value       = self.initial_capital
+        self._daily_start_value   = self.initial_capital
+        self._daily_date          = date.today()
+        self._consecutive_losses  = 0
+        self._paused              = False
+        self._pause_reason        = ""
 
     @property
     def is_paused(self) -> bool:
@@ -45,31 +52,48 @@ class CircuitBreaker:
         """
         today = date.today()
         if today != self._daily_date:
-            # Nouveau jour → reset daily
-            self._daily_date = today
+            # Nouveau jour → reset tous les compteurs journaliers
+            self._daily_date        = today
             self._daily_start_value = portfolio_value
+            self._intraday_peak     = portfolio_value
+            self._ptsl_active       = False
             self._consecutive_losses = 0
-            self._paused = False
+            self._paused            = False
 
-        self._current_value = portfolio_value
-        self._peak_value = max(self._peak_value, portfolio_value)
+        self._current_value  = portfolio_value
+        self._peak_value     = max(self._peak_value, portfolio_value)
+        self._intraday_peak  = max(self._intraday_peak, portfolio_value)
 
-        # Vérif drawdown global
+        # 1. Drawdown global (depuis le pic absolu)
         drawdown_pct = (self._peak_value - portfolio_value) / self._peak_value * 100
         if drawdown_pct >= self.max_drawdown_pct:
             self._trip(f"Drawdown {drawdown_pct:.1f}% ≥ {self.max_drawdown_pct}%")
             return False
 
-        # Vérif perte journalière
+        # 2. Perte journalière
         daily_loss_pct = (self._daily_start_value - portfolio_value) / self._daily_start_value * 100
         if daily_loss_pct >= self.max_daily_loss_pct:
             self._trip(f"Perte journalière {daily_loss_pct:.1f}% ≥ {self.max_daily_loss_pct}%")
             return False
 
-        # Vérif pertes consécutives
+        # 3. Pertes consécutives
         if self._consecutive_losses >= self.max_consecutive_losses:
             self._trip(f"{self._consecutive_losses} pertes consécutives")
             return False
+
+        # 4. Trailing stop portefeuille (verrouille les gains intraday)
+        intraday_gain_pct = (self._intraday_peak - self._daily_start_value) / self._daily_start_value * 100
+        if intraday_gain_pct >= self._ptsl_activation_pct:
+            self._ptsl_active = True
+
+        if self._ptsl_active:
+            stop_level = self._intraday_peak * (1 - self._ptsl_stop_pct / 100)
+            if portfolio_value <= stop_level:
+                self._trip(
+                    f"Trailing stop portefeuille: {portfolio_value:.2f}$ <= {stop_level:.2f}$ "
+                    f"(pic={self._intraday_peak:.2f}$, gain_max={intraday_gain_pct:.1f}%)"
+                )
+                return False
 
         return True
 
@@ -83,21 +107,24 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         """Réinitialisation manuelle (ex: décision opérateur)."""
-        self._paused = False
-        self._pause_reason = ""
-        self._consecutive_losses = 0
+        self._paused              = False
+        self._pause_reason        = ""
+        self._consecutive_losses  = 0
+        self._ptsl_active         = False
         logger.warning("CircuitBreaker: réinitialisé manuellement")
 
     def _trip(self, reason: str) -> None:
         if not self._paused:
-            self._paused = True
+            self._paused       = True
             self._pause_reason = reason
             logger.critical(f"⛔ CIRCUIT BREAKER DÉCLENCHÉ : {reason}")
 
     def status(self) -> dict:
         return {
-            "paused": self._paused,
-            "reason": self._pause_reason,
-            "drawdown_pct": (self._peak_value - self._current_value) / self._peak_value * 100,
+            "paused":            self._paused,
+            "reason":            self._pause_reason,
+            "drawdown_pct":      (self._peak_value - self._current_value) / self._peak_value * 100,
             "consecutive_losses": self._consecutive_losses,
+            "ptsl_active":       self._ptsl_active,
+            "intraday_peak":     self._intraday_peak,
         }

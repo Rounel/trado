@@ -16,6 +16,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from loguru import logger
 
+from backtest.engine import COMMISSION_PCT, adaptive_slippage
 from backtest.metrics import BacktestMetrics, compute_metrics
 
 
@@ -130,31 +131,43 @@ class WalkForwardOptimizer:
         strategy,
         initial_capital: float,
     ) -> BacktestMetrics:
-        """Simule la stratégie sur le pli de test."""
-        capital = initial_capital
-        position = 0.0
+        """
+        Simule la stratégie sur le pli de test avec slippage adaptatif.
+        Utilise adaptive_slippage() basé sur ATR et taille d'ordre.
+        """
+        capital     = initial_capital
+        position    = 0.0
         entry_price = 0.0
-        equity_values = [capital]
-        trades: list[float] = []
+        equity_values: list[float] = [capital]
+        trades:        list[float] = []
 
         for _, row in test_df.iterrows():
-            features = row.to_dict()
+            features    = row.to_dict()
+            close       = float(row["close"])
+            atr         = float(row.get("atr_14", 0) or 0)
+            bar_vol_usd = float(row.get("volume", 0) or 0) * close
+
             signal = strategy.on_bar(features)
 
             if signal and signal.action == "BUY" and position == 0:
-                qty = (capital * 0.95) / row["close"]
-                cost = qty * row["close"] * 1.001
+                order_usd   = capital * 0.95
+                slip        = adaptive_slippage(close, atr, order_usd, bar_vol_usd)
+                entry_price = close * (1 + slip)
+                qty         = order_usd / entry_price
+                cost        = qty * entry_price * (1 + COMMISSION_PCT)
                 if cost <= capital:
-                    capital -= cost
-                    position = qty
-                    entry_price = row["close"]
+                    capital  -= cost
+                    position  = qty
 
             elif signal and signal.action == "SELL" and position > 0:
-                proceeds = position * row["close"] * 0.999
+                order_usd  = position * close
+                slip       = adaptive_slippage(close, atr, order_usd, bar_vol_usd)
+                exit_price = close * (1 - slip)
+                proceeds   = position * exit_price * (1 - COMMISSION_PCT)
                 trades.append(proceeds - position * entry_price)
-                capital += proceeds
-                position = 0.0
+                capital   += proceeds
+                position   = 0.0
 
-            equity_values.append(capital + position * row["close"])
+            equity_values.append(capital + position * close)
 
         return compute_metrics(pd.Series(equity_values), trades)

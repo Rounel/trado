@@ -37,12 +37,20 @@ class TechnicalIndicators:
             df["macd_hist"]   = macd["MACDh_12_26_9"]
 
         # Bollinger Bands (20, 2)
+        # pandas-ta ≥ 0.3.14 génère des colonnes avec suffixe double : BBU_20_2.0_2.0
         bbands = ta.bbands(df["close"], length=20, std=2)
         if bbands is not None:
-            df["bb_upper"] = bbands["BBU_20_2.0"]
-            df["bb_mid"]   = bbands["BBM_20_2.0"]
-            df["bb_lower"] = bbands["BBL_20_2.0"]
-            df["bb_pct"]   = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"] + 1e-8)
+            cols = bbands.columns.tolist()
+            bb_upper_col = next((c for c in cols if c.startswith("BBU")), None)
+            bb_mid_col   = next((c for c in cols if c.startswith("BBM")), None)
+            bb_lower_col = next((c for c in cols if c.startswith("BBL")), None)
+            if bb_upper_col and bb_mid_col and bb_lower_col:
+                df["bb_upper"] = bbands[bb_upper_col]
+                df["bb_mid"]   = bbands[bb_mid_col]
+                df["bb_lower"] = bbands[bb_lower_col]
+                df["bb_pct"]   = (df["close"] - df["bb_lower"]) / (
+                    df["bb_upper"] - df["bb_lower"] + 1e-8
+                )
 
         # ATR (Average True Range, 14)
         df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)

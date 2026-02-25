@@ -12,7 +12,7 @@ from trading.strategies.base import Signal
 
 @pytest.fixture
 def settings() -> Settings:
-    """Settings de test avec des seuils bas pour faciliter les tests."""
+    """Settings de test avec des seuils explicites pour faciliter les tests."""
     s = Settings()
     s.risk = RiskConfig(
         max_drawdown_pct=10.0,
@@ -21,7 +21,15 @@ def settings() -> Settings:
         max_positions=3,
         kelly_fraction=0.25,
         atr_sl_multiplier=2.0,
-        atr_tp_multiplier=3.0,
+        atr_tp_multiplier=6.0,
+        min_rr_ratio=3.0,
+        trailing_stop_pct=1.5,
+        trailing_stop_activation_pct=0.5,
+        portfolio_trailing_stop_pct=2.0,
+        portfolio_trailing_activation_pct=2.0,
+        livermore_enabled=False,   # désactivé dans les tests unitaires de base
+        livermore_initial_fraction=0.33,
+        livermore_add_trigger_pct=0.5,
     )
     return s
 
@@ -35,7 +43,8 @@ class TestCircuitBreaker:
     def test_no_trip_normal_conditions(self, settings):
         cb = CircuitBreaker(settings)
         assert cb.update(10_000.0) is True
-        assert cb.update(9_500.0) is True  # 5% drawdown, pas déclenché
+        # 2% drawdown : sous les deux seuils (max_drawdown=10%, max_daily_loss=3%)
+        assert cb.update(9_800.0) is True
 
     def test_trip_on_max_drawdown(self, settings):
         cb = CircuitBreaker(settings)

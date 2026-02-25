@@ -1,11 +1,11 @@
 """
-backtest/engine.py — Moteur de backtest (VectorBT + frais/slippage réalistes).
+backtest/engine.py — Moteur de backtest event-driven.
 
-Workflow :
-  1. Télécharge les données historiques (ccxt)
-  2. Calcule les indicateurs techniques
-  3. Applique la stratégie barre par barre
-  4. Calcule les métriques de performance
+Slippage adaptatif (v2) :
+  Le slippage fixe 0.05% est remplacé par un modèle en deux composantes :
+  1. Volatilité  : ATR élevé → spread plus large (×1 à ×2)
+  2. Impact marché : gros ordre par rapport au volume de la barre → déplacement de prix
+                     < 0.5% du volume → ×1   |   0.5-2% → ×2   |   > 2% → ×3
 """
 from __future__ import annotations
 
@@ -22,98 +22,137 @@ if TYPE_CHECKING:
     from config.settings import Settings
 
 
-class BacktestEngine:
-    """Moteur de backtest event-driven avec frais et slippage."""
+# Frais de commission fixes (Binance spot maker/taker)
+COMMISSION_PCT = 0.001   # 0.1% par trade
+BASE_SLIPPAGE  = 0.0005  # 0.05% slippage de base
 
-    # Paramètres réalistes pour Binance spot
-    COMMISSION_PCT = 0.001   # 0.1% par trade
-    SLIPPAGE_PCT   = 0.0005  # 0.05% glissement de prix
+
+def adaptive_slippage(
+    close:          float,
+    atr:            float,
+    order_usd:      float,
+    bar_volume_usd: float,
+    base:           float = BASE_SLIPPAGE,
+) -> float:
+    """
+    Calcule le slippage adaptatif en pourcentage du prix.
+
+    Composante volatilité :
+      atr_pct = ATR / close  →  multiplicateur linéaire [1.0 … 2.0] pour ATR ∈ [0 … 5%]
+
+    Composante impact de marché :
+      impact = order_usd / bar_volume_usd
+        < 0.5% du volume  → ×1.0 (ordre atomique, pas d'impact)
+        0.5 – 2% du volume→ ×2.0 (ordre notable)
+        > 2% du volume    → ×3.0 (ordre déplace le carnet)
+    """
+    # Volatilité
+    atr_pct   = atr / max(close, 1e-8)
+    vol_mult  = 1.0 + min(atr_pct / 0.05, 1.0)  # cap à 2.0× pour ATR ≥ 5%
+
+    # Impact de marché
+    impact_r = order_usd / max(bar_volume_usd, 1.0)
+    if impact_r > 0.02:
+        impact_mult = 3.0
+    elif impact_r > 0.005:
+        impact_mult = 2.0
+    else:
+        impact_mult = 1.0
+
+    return base * vol_mult * impact_mult
+
+
+class BacktestEngine:
+    """Moteur de backtest event-driven avec frais et slippage adaptatif."""
 
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
 
     def run(
         self,
-        strategy_name: str,
-        symbol: str = "BTC/USDT",
-        start: str = "2024-01-01",
-        end: str = "2024-12-31",
-        timeframe: str = "1h",
+        strategy_name:   str,
+        symbol:          str   = "BTC/USDT",
+        start:           str   = "2024-01-01",
+        end:             str   = "2024-12-31",
+        timeframe:       str   = "1h",
         initial_capital: float = 10_000.0,
     ) -> BacktestMetrics:
         """Lance le backtest et retourne les métriques."""
-        logger.info(f"BacktestEngine: {strategy_name}  {symbol}  {start}→{end}  {timeframe}")
+        logger.info(f"BacktestEngine: {strategy_name}  {symbol}  {start} -> {end}  {timeframe}")
 
-        # 1. Chargement des données
         df = self._load_data(symbol, timeframe, start, end)
         if df.empty:
             logger.error("Aucune donnée récupérée.")
             return self._empty_metrics()
 
-        # 2. Indicateurs
         df = TechnicalIndicators.add_all(df)
         df.dropna(inplace=True)
 
-        # 3. Stratégie
-        strategy = self._build_strategy(strategy_name)
-
-        # 4. Simulation barre par barre
-        capital = initial_capital
-        position = 0.0
-        entry_price = 0.0
-        equity_values = [capital]
+        strategy        = self._build_strategy(strategy_name)
+        capital         = initial_capital
+        position        = 0.0
+        entry_price     = 0.0
+        entry_slip      = 0.0   # slippage mémorisé à l'entrée
+        equity_values   = [capital]
         trades: list[float] = []
 
-        for i, (_, row) in enumerate(df.iterrows()):
-            features = row.to_dict()
-            features["close"] = row["close"]
+        for _, row in df.iterrows():
+            features        = row.to_dict()
+            close           = float(row["close"])
+            atr             = float(row.get("atr_14", 0) or 0)
+            bar_vol_usd     = float(row.get("volume", 0) or 0) * close
 
             signal = strategy.on_bar(features)
 
             if signal and signal.action == "BUY" and position == 0:
-                # Entrée long
-                entry_price = row["close"] * (1 + self.SLIPPAGE_PCT)
-                qty = (capital * 0.95) / entry_price
-                cost = qty * entry_price * (1 + self.COMMISSION_PCT)
+                order_usd    = capital * 0.95
+                slip         = adaptive_slippage(close, atr, order_usd, bar_vol_usd)
+                entry_slip   = slip
+                entry_price  = close * (1 + slip)
+                qty          = order_usd / entry_price
+                cost         = qty * entry_price * (1 + COMMISSION_PCT)
                 if cost <= capital:
-                    capital -= cost
-                    position = qty
+                    capital  -= cost
+                    position  = qty
 
             elif signal and signal.action == "SELL" and position > 0:
-                # Sortie long
-                exit_price = row["close"] * (1 - self.SLIPPAGE_PCT)
-                proceeds = position * exit_price * (1 - self.COMMISSION_PCT)
-                pnl = proceeds - (position * entry_price)
-                capital += proceeds
+                order_usd   = position * close
+                slip        = adaptive_slippage(close, atr, order_usd, bar_vol_usd)
+                exit_price  = close * (1 - slip)
+                proceeds    = position * exit_price * (1 - COMMISSION_PCT)
+                pnl         = proceeds - (position * entry_price)
+                capital    += proceeds
                 trades.append(pnl)
-                position = 0.0
+                position    = 0.0
 
-            # SL/TP check
+            # SL/TP check (utilise le slippage d'entrée pour la cohérence)
             if position > 0 and signal:
                 if signal.stop_loss and row["low"] < signal.stop_loss:
-                    exit_price = signal.stop_loss * (1 - self.SLIPPAGE_PCT)
-                    proceeds = position * exit_price * (1 - self.COMMISSION_PCT)
-                    pnl = proceeds - (position * entry_price)
-                    capital += proceeds
+                    order_usd  = position * signal.stop_loss
+                    slip       = adaptive_slippage(signal.stop_loss, atr, order_usd, bar_vol_usd)
+                    exit_price = signal.stop_loss * (1 - slip)
+                    proceeds   = position * exit_price * (1 - COMMISSION_PCT)
+                    pnl        = proceeds - (position * entry_price)
+                    capital   += proceeds
                     trades.append(pnl)
-                    position = 0.0
+                    position   = 0.0
                 elif signal.take_profit and row["high"] > signal.take_profit:
-                    exit_price = signal.take_profit * (1 - self.SLIPPAGE_PCT)
-                    proceeds = position * exit_price * (1 - self.COMMISSION_PCT)
-                    pnl = proceeds - (position * entry_price)
-                    capital += proceeds
+                    order_usd  = position * signal.take_profit
+                    slip       = adaptive_slippage(signal.take_profit, atr, order_usd, bar_vol_usd)
+                    exit_price = signal.take_profit * (1 - slip)
+                    proceeds   = position * exit_price * (1 - COMMISSION_PCT)
+                    pnl        = proceeds - (position * entry_price)
+                    capital   += proceeds
                     trades.append(pnl)
-                    position = 0.0
+                    position   = 0.0
 
-            # Valeur totale
-            total_value = capital + position * row["close"]
-            equity_values.append(total_value)
+            equity_values.append(capital + position * close)
 
-        # Fermeture position finale
+        # Fermeture de la position finale
         if position > 0:
-            last_price = df["close"].iloc[-1]
-            proceeds = position * last_price * (1 - self.COMMISSION_PCT)
-            pnl = proceeds - (position * entry_price)
+            last = df["close"].iloc[-1]
+            proceeds = position * last * (1 - COMMISSION_PCT)
+            pnl      = proceeds - (position * entry_price)
             capital += proceeds
             trades.append(pnl)
 
@@ -122,8 +161,11 @@ class BacktestEngine:
         logger.info(f"\n{metrics.summary()}")
         return metrics
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     def _load_data(self, symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
-        """Charge les données historiques via le collecteur OHLCV."""
         from data.collectors.ohlcv import OHLCVCollector
         collector = OHLCVCollector(settings=self.settings)
         try:

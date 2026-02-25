@@ -5,7 +5,8 @@ Pipeline :
   1. Buffer OHLCV → TechnicalIndicators → score technique
   2. Features normalisées → TFT + RL → score IA (si modèles chargés)
   3. Sentiment Grok + Order Book (injectés par l'engine) → score externe
-  4. SignalFusion (poids 35/40/15/10) → BUY / SELL / HOLD
+  4. SignalFusion + CPO (poids adaptatifs via market_context) → BUY / SELL / HOLD
+  5. ProbabilityOfProfitFilter → rejet si PoP < 0.50
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import pandas as pd
 from loguru import logger
 
 from analysis.aggregator.signal_fusion import SignalFusion
+from analysis.corrective.pop_filter import ProbabilityOfProfitFilter
 from analysis.technical.indicators import TechnicalIndicators
 from trading.strategies.base import BaseStrategy, Signal
 
@@ -31,8 +33,9 @@ class AIStrategy(BaseStrategy):
 
     def __init__(self, settings: "Settings", symbol: str = "BTC/USDT") -> None:
         super().__init__(settings)
-        self.symbol = symbol
-        self._fusion = SignalFusion()
+        self.symbol    = symbol
+        self._fusion   = SignalFusion()
+        self._pop      = ProbabilityOfProfitFilter(min_pop=0.50)
         self._buffer: deque[dict] = deque(maxlen=self.WARMUP_BARS + 10)
         self._tft = None    # chargé via load_models()
         self._rl  = None    # chargé via load_models()
@@ -87,19 +90,36 @@ class AIStrategy(BaseStrategy):
         sentiment_score = float(features.get("sentiment_score", 0.0) or 0.0)
         ob_imbalance    = float(features.get("ob_imbalance", 0.0) or 0.0)
 
-        # --- Fusion finale (poids adaptatifs selon régime) ---
+        # --- Market context pour CPO et PoP ---
+        atr_14       = float(last.get("atr_14", 0) or 0)
+        atr_series   = df["atr_14"].dropna()
+        atr_roll_50  = float(atr_series.rolling(50).mean().iloc[-1]) if len(atr_series) >= 50 else float(atr_series.mean() or 1e-8)
+        atr_ratio    = atr_14 / max(atr_roll_50, 1e-8)
+        market_context = {
+            "atr_ratio":    atr_ratio,
+            "volume_ratio": float(last.get("volume_ratio", 1.0) or 1.0),
+            "adx":          float(last.get("adx_14", 25.0) or 25.0),
+        }
+
+        # --- Fusion finale avec CPO (poids adaptatifs régime + conditions marché) ---
         fused = self._fusion.fuse(
             tech_score=tech_score,
             ai_score=ai_score,
             sentiment_score=sentiment_score,
             ob_imbalance=ob_imbalance,
             regime=regime,
+            market_context=market_context,
         )
 
         if fused.decision.value == "HOLD":
             return None
 
-        atr = float(last.get("atr_14", 0) or 0)
+        # --- Filtre Corrective AI (PoP < 0.50 → rejet) ---
+        allowed, pop = self._pop.should_trade(fused, market_context)
+        if not allowed:
+            return None
+
+        atr = atr_14
         stops = TechnicalIndicators.atr_stops(
             close, atr,
             sl_mult=self.settings.risk.atr_sl_multiplier,
@@ -112,11 +132,13 @@ class AIStrategy(BaseStrategy):
         w = fused.weights_used or {}
         logger.info(
             f"AIStrategy [{self.symbol}]: {action} @ {close:.5f} | "
-            f"regime={regime}  score={fused.score:+.3f}  conf={fused.confidence:.2f}\n"
-            f"  tech={tech_score:+.2f}(×{w.get('tech',0):.2f})  "
-            f"ai={ai_score:+.2f}(×{w.get('ai',0):.2f})  "
-            f"sent={sentiment_score:+.2f}(×{w.get('sentiment',0):.2f})  "
-            f"ob={ob_imbalance:+.2f}(×{w.get('ob',0):.2f})"
+            f"regime={regime}  score={fused.score:+.3f}  conf={fused.confidence:.2f}  "
+            f"PoP={pop:.2f}\n"
+            f"  tech={tech_score:+.2f}(x{w.get('tech',0):.2f})  "
+            f"ai={ai_score:+.2f}(x{w.get('ai',0):.2f})  "
+            f"sent={sentiment_score:+.2f}(x{w.get('sentiment',0):.2f})  "
+            f"ob={ob_imbalance:+.2f}(x{w.get('ob',0):.2f})  "
+            f"atr_ratio={atr_ratio:.2f}"
         )
 
         return Signal(
@@ -134,9 +156,12 @@ class AIStrategy(BaseStrategy):
                 "ob_imbalance":   ob_imbalance,
                 "regime":         regime,
                 "weights":        fused.weights_used,
+                "cpo":            (fused.metadata or {}).get("cpo"),
+                "pop":            pop,
                 "rsi":            float(last.get("rsi_14", 0) or 0),
                 "macd_hist":      float(last.get("macd_hist", 0) or 0),
                 "atr":            atr,
+                "atr_ratio":      atr_ratio,
             },
         )
 

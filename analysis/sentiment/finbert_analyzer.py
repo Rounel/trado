@@ -10,6 +10,11 @@ Avantages vs Grok :
   - 100% local, pas d'API externe, pas de coût par appel
   - Déterministe (même texte → même score)
 
+Quantization INT8 (v2) :
+  Par défaut, torch.quantization.quantize_dynamic est appliqué aux couches
+  Linear → réduction ~4× de la mémoire, inférence CPU plus rapide.
+  Fallback automatique sur FP32 si PyTorch ou la quantization échoue.
+
 Inconvénients :
   - ~440 MB à télécharger au premier lancement
   - Nécessite : `uv add transformers`
@@ -28,18 +33,45 @@ if TYPE_CHECKING:
     pass
 
 
-@lru_cache(maxsize=1)
-def _load_pipeline():
-    """Charge le pipeline FinBERT une seule fois (lazy, thread-safe via lru_cache)."""
+@lru_cache(maxsize=2)
+def _load_pipeline(quantize: bool = True):
+    """
+    Charge le pipeline FinBERT une seule fois (lazy, thread-safe via lru_cache).
+
+    Args:
+        quantize : si True, tente une quantization INT8 dynamic sur les couches
+                   Linear pour réduire l'empreinte mémoire (~4×) et accélérer
+                   l'inférence CPU. Fallback silencieux sur FP32 si échec.
+    """
     from transformers import pipeline  # type: ignore[import]
-    logger.info("FinBERT: chargement du modèle ProsusAI/finbert…")
+
+    logger.info("FinBERT: chargement du modele ProsusAI/finbert...")
     pipe = pipeline(
         "text-classification",
         model="ProsusAI/finbert",
         top_k=None,           # retourne toutes les classes avec leurs scores
         device=-1,            # CPU (-1), GPU (0)
     )
-    logger.info("FinBERT: modèle chargé ✅")
+    logger.info("FinBERT: modele charge")
+
+    if quantize:
+        try:
+            import torch
+            torch.quantization.quantize_dynamic(
+                pipe.model,
+                {torch.nn.Linear},
+                dtype=torch.qint8,
+                inplace=True,
+            )
+            logger.info(
+                "FinBERT: quantization INT8 appliquee (Linear layers) "
+                "— empreinte memoire reduite ~4x"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"FinBERT: quantization INT8 echouee, fallback FP32 — {exc}"
+            )
+
     return pipe
 
 
@@ -47,13 +79,18 @@ class FinBERTAnalyzer:
     """
     Analyse le sentiment financier d'un texte via FinBERT.
     Retourne un score normalisé [-1, +1].
+
+    Args:
+        use_cache : met en cache les scores par texte (évite les doublons)
+        quantize  : active la quantization INT8 dynamic au chargement du modèle
     """
 
     # Mapping label FinBERT → direction
     _LABEL_SIGN = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 
-    def __init__(self, use_cache: bool = True) -> None:
+    def __init__(self, use_cache: bool = True, quantize: bool = True) -> None:
         self._use_cache = use_cache
+        self._quantize  = quantize
         self._cache: dict[str, float] = {}  # text hash → score
         self._available: bool | None = None
 
@@ -90,7 +127,7 @@ class FinBERTAnalyzer:
             return self._cache[text]
 
         try:
-            pipe = _load_pipeline()
+            pipe = _load_pipeline(self._quantize)
             results = pipe(text[:512])  # FinBERT limité à 512 tokens
 
             # results = [[{"label": "positive", "score": 0.92}, ...]]
@@ -119,7 +156,7 @@ class FinBERTAnalyzer:
             return [0.0] * len(texts)
 
         try:
-            pipe = _load_pipeline()
+            pipe = _load_pipeline(self._quantize)
             truncated = [t[:512] for t in texts]
             all_results = pipe(truncated)
 

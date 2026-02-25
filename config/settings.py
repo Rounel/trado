@@ -15,6 +15,17 @@ class BinanceConfig(BaseSettings):
     secret: str = Field(default="", description="Binance secret")
     testnet: bool = Field(default=True, description="True = paper trading sur testnet")
 
+    # --- Fragmentation VWAP (gros ordres) ---
+    vwap_threshold_usd: float = Field(
+        default=10_000.0,
+        description="Seuil USD au-delà duquel l'ordre est fragmenté en tranches VWAP (0 = désactivé)",
+    )
+    vwap_slices: int = Field(default=5, description="Nombre de tranches enfants pour l'exécution VWAP")
+    vwap_slice_delay_s: float = Field(
+        default=30.0,
+        description="Délai en secondes entre chaque tranche VWAP",
+    )
+
 
 class AlpacaConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ALPACA_", extra="ignore")
@@ -68,7 +79,24 @@ class RiskConfig(BaseSettings):
     max_positions: int = Field(default=5, description="Nombre max de positions ouvertes simultanées")
     kelly_fraction: float = Field(default=0.25, description="Fraction Kelly (0.25 = quart-Kelly)")
     atr_sl_multiplier: float = Field(default=2.0, description="Multiplicateur ATR pour Stop Loss")
-    atr_tp_multiplier: float = Field(default=3.0, description="Multiplicateur ATR pour Take Profit")
+    # TP = 6×ATR avec SL = 2×ATR → ratio R/R = 3:1 (conforme à min_rr_ratio)
+    atr_tp_multiplier: float = Field(default=6.0, description="Multiplicateur ATR pour Take Profit (6× avec SL 2× → R/R 3:1)")
+
+    # --- Filtre Risk/Reward ---
+    min_rr_ratio: float = Field(default=3.0, description="Ratio Reward/Risk minimum requis par signal")
+
+    # --- Trailing stop par position ---
+    trailing_stop_pct: float = Field(default=1.5, description="Distance du trailing stop depuis le pic position (%)")
+    trailing_stop_activation_pct: float = Field(default=0.5, description="Gain minimal pour activer le trailing stop (%)")
+
+    # --- Trailing stop niveau portefeuille ---
+    portfolio_trailing_stop_pct: float = Field(default=2.0, description="Trailing stop portefeuille depuis pic intraday (%)")
+    portfolio_trailing_activation_pct: float = Field(default=2.0, description="Gain portefeuille intraday pour activer le trailing stop (%)")
+
+    # --- Système de Livermore (entrées partielles pyramidales) ---
+    livermore_enabled: bool = Field(default=True, description="Active les entrées partielles style Livermore")
+    livermore_initial_fraction: float = Field(default=0.33, description="Fraction initiale de la position (1/3 par défaut)")
+    livermore_add_trigger_pct: float = Field(default=0.5, description="Mouvement favorable (%) pour ajouter à la position")
 
 
 class Settings(BaseSettings):

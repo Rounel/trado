@@ -67,10 +67,10 @@ class TestBacktestMetrics:
         metrics = compute_metrics(equity, trades)
 
         assert metrics.total_trades == 4
-        assert metrics.winning_trades == 3
-        assert metrics.losing_trades == 1
+        assert metrics.winning_trades == 2   # [100, 150] > 0
+        assert metrics.losing_trades == 2    # [-50, -20] <= 0
         assert metrics.profit_factor > 1.0
-        assert metrics.win_rate == pytest.approx(0.75)
+        assert metrics.win_rate == pytest.approx(0.5)
 
     def test_summary_contains_sharpe(self):
         from backtest.metrics import compute_metrics
@@ -92,7 +92,7 @@ class TestIndicatorsPipeline:
         from analysis.technical.indicators import TechnicalIndicators
         result = TechnicalIndicators.add_all(sample_ohlcv_df)
         assert len(result) > 0
-        assert result["rsi_14"].between(0, 100).all()
+        assert result["rsi_14"].dropna().between(0, 100).all()  # NaN sur les premières barres (warmup)
 
     def test_tech_score_from_indicators(self, sample_ohlcv_df):
         from analysis.technical.indicators import TechnicalIndicators

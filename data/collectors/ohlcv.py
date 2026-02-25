@@ -59,7 +59,8 @@ class OHLCVCollector:
         """Récupère `limit` bougies OHLCV depuis Binance via ccxt.pro."""
         exchange = await self._get_exchange()
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        await exchange.close()
+        # Ne pas appeler exchange.close() ici : la connexion est réutilisée
+        # par la boucle stream() et la fermer à chaque itération coûte cher.
         return self._to_dataframe(ohlcv)
 
     async def fetch_binance_latest(
@@ -136,6 +137,10 @@ class OHLCVCollector:
         if self._exchange is None:
             import ccxt.pro as ccxtpro  # type: ignore[import]
 
+            # Les données OHLCV sont publiques : on utilise toujours l'API
+            # principale de Binance, jamais le testnet.
+            # Le testnet (testnet.binance.vision) a des données limitées et
+            # est réservé à l'exécution d'ordres (BinanceExecutor).
             self._exchange = ccxtpro.binance(
                 {
                     "apiKey": self.settings.binance.api_key,
@@ -143,8 +148,6 @@ class OHLCVCollector:
                     "options": {"defaultType": "spot"},
                 }
             )
-            if self.settings.binance.testnet:
-                self._exchange.set_sandbox_mode(True)
         return self._exchange
 
     @staticmethod

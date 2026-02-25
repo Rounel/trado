@@ -5,6 +5,11 @@ Boucle de vie :
   start() → une tâche asyncio PAR symbole, en parallèle
            → collecte → features [+ sentiment + OB si ai] → signal → risk → executor
   stop()  → annulation propre de toutes les tâches
+
+Journalisation (v2) :
+  Chaque trade fermé et chaque snapshot de portefeuille sont écrits dans
+  data/cache/trado_journal.db via data.pipeline.trade_journal.
+  Le dashboard Streamlit lit ces données en temps réel.
 """
 from __future__ import annotations
 
@@ -17,11 +22,8 @@ from loguru import logger
 if TYPE_CHECKING:
     from config.settings import Settings
 
-# Fréquence de rafraîchissement du sentiment Grok (secondes)
-# Évite d'appeler l'API Grok à chaque bougie (coûteux + lent)
-_SENTIMENT_REFRESH_S = 900   # 15 minutes
+_SENTIMENT_REFRESH_S = 900   # 15 minutes entre deux appels Grok par symbole
 
-# Symboles par défaut selon le broker
 _DEFAULT_SYMBOLS: dict[str, list[str]] = {
     "binance": ["BTC/USDT"],
     "alpaca":  ["AAPL"],
@@ -34,19 +36,19 @@ class TradoEngine:
 
     def __init__(
         self,
-        settings: "Settings",
+        settings:      "Settings",
         strategy_name: str = "ema_rsi",
-        broker: str = "binance",
-        symbols: list[str] | None = None,
-        timeframe: str = "1h",
+        broker:        str = "binance",
+        symbols:       list[str] | None = None,
+        timeframe:     str = "1h",
     ) -> None:
-        self.settings = settings
+        self.settings      = settings
         self.strategy_name = strategy_name
-        self.broker = broker
-        self.symbols = symbols or _DEFAULT_SYMBOLS.get(broker, ["BTC/USDT"])
-        self.timeframe = timeframe
-        self._running = False
-        self._tasks: list[asyncio.Task] = []
+        self.broker        = broker
+        self.symbols       = symbols or _DEFAULT_SYMBOLS.get(broker, ["BTC/USDT"])
+        self.timeframe     = timeframe
+        self._running      = False
+        self._tasks:       list[asyncio.Task] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -55,7 +57,12 @@ class TradoEngine:
     async def start(self) -> None:
         """Démarre une boucle de trading par symbole, toutes en parallèle."""
         from monitoring.logger import setup_logger
+        from data.pipeline.trade_journal import init_async as journal_init
+
         setup_logger(self.settings)
+
+        # Initialise le journal SQLite (crée les tables si absentes)
+        await journal_init()
 
         logger.info(
             f"TradoEngine starting — strategy={self.strategy_name} broker={self.broker} "
@@ -63,11 +70,8 @@ class TradoEngine:
         )
 
         self._running = True
+        executor      = self._build_executor()
 
-        # L'exécuteur est partagé entre tous les symboles (une seule connexion broker)
-        executor = self._build_executor()
-
-        # Une tâche asyncio par symbole
         self._tasks = [
             asyncio.create_task(
                 self._run_symbol(symbol, executor),
@@ -104,7 +108,6 @@ class TradoEngine:
         strategy  = self._build_strategy(symbol)
         risk_mgr  = self._build_risk_manager()
 
-        # Enrichissement AI : sentiment Grok + order book (uniquement pour AIStrategy)
         grok         = None
         ob_collector = None
         if self.strategy_name == "ai":
@@ -113,7 +116,6 @@ class TradoEngine:
             grok         = GrokAnalyzer(self.settings)
             ob_collector = OrderBookCollector(self.settings)
 
-        # Cache sentiment par symbole : (score, timestamp)
         sentiment_cache: dict[str, tuple[float, float]] = {}
 
         logger.info(f"[{symbol}] boucle démarrée ({self.timeframe})")
@@ -133,12 +135,12 @@ class TradoEngine:
             logger.exception(f"[{symbol}] erreur — {exc}")
 
     # ------------------------------------------------------------------
-    # Callbacks internes
+    # Traitement barre par barre
     # ------------------------------------------------------------------
 
     async def _on_bar(
         self,
-        bar: dict,
+        bar:            dict,
         strategy,
         risk_mgr,
         executor,
@@ -146,10 +148,14 @@ class TradoEngine:
         ob_collector=None,
         sentiment_cache: dict | None = None,
     ) -> None:
-        """Traite une nouvelle bougie OHLCV, enrichit avec sentiment + OB si AIStrategy."""
+        """Traite une nouvelle bougie OHLCV."""
         from data.pipeline.features import FeatureBuilder
-        features = FeatureBuilder.from_bar(bar)
-        symbol   = bar.get("symbol", "")
+        from data.pipeline.trade_journal import record_closed_trade, record_snapshot
+        from trading.strategies.base import Signal as TradoSignal
+
+        features    = FeatureBuilder.from_bar(bar)
+        symbol      = bar.get("symbol", "")
+        close_price = float(bar.get("close", 0) or 0)
 
         # Enrichissement async (sentiment + order book en parallèle)
         if grok is not None or ob_collector is not None:
@@ -159,20 +165,93 @@ class TradoEngine:
             features["sentiment_score"] = sentiment_score
             features["ob_imbalance"]    = ob_imbalance
 
+        # ── 1. Trailing stops ──────────────────────────────────────────
+        triggered = risk_mgr.update_trailing_stops({symbol: close_price})
+        for sym in triggered:
+            logger.info(f"[{sym}] Trailing stop -> fermeture position au marche")
+            pos = risk_mgr.get_position(sym)   # récupère avant la fermeture
+            close_sig = TradoSignal(action="SELL", symbol=sym, confidence=1.0, strategy="trailing_stop")
+            try:
+                order      = await executor.submit(close_sig)
+                exit_price = float((order or {}).get("price", close_price) or close_price)
+            except Exception as exc:
+                logger.error(f"[{sym}] Erreur fermeture trailing stop : {exc}")
+                exit_price = close_price
+            pnl = risk_mgr.record_close(sym, exit_price)
+            if pos:
+                await record_closed_trade(
+                    symbol=sym, side=pos["side"],
+                    entry=pos["entry"], exit_price=exit_price,
+                    size=pos["size"], pnl=pnl, strategy="trailing_stop",
+                )
+
+        # ── 2. Renforcement Livermore ──────────────────────────────────
+        reinforce = risk_mgr.check_livermore_add(symbol, close_price)
+        if reinforce is not None:
+            try:
+                order       = await executor.submit(reinforce)
+                entry_price = float((order or {}).get("price", close_price) or close_price)
+            except Exception as exc:
+                logger.error(f"[{symbol}] Erreur renforcement Livermore : {exc}")
+                entry_price = close_price
+            if reinforce.size:
+                risk_mgr.record_open(
+                    symbol, reinforce.action, reinforce.size,
+                    entry_price, reinforce.stop_loss,
+                )
+
+        # ── 3. Signal stratégie normal ─────────────────────────────────
         signal = strategy.on_bar(features)
         if signal is None:
+            # Snapshot portfolio même sans trade
+            await record_snapshot(
+                risk_mgr._portfolio_value,
+                len(risk_mgr._open_positions),
+            )
             return
 
-        if not risk_mgr.validate_signal(signal):
-            logger.debug(f"Signal refusé par RiskManager : {signal}")
+        signal.entry_price = close_price
+
+        if not risk_mgr.validate_signal(signal, price=close_price):
+            logger.debug(f"Signal refuse par RiskManager : {signal}")
+            await record_snapshot(risk_mgr._portfolio_value, len(risk_mgr._open_positions))
             return
 
-        logger.info(f"Exécution du signal : {signal}")
-        await executor.submit(signal)
+        # ── 4. Sizing ─────────────────────────────────────────────────
+        atr = float(signal.metadata.get("atr", 0) or 0)
+        risk_mgr.size_signal(signal, risk_mgr._portfolio_value, close_price, atr)
+
+        # ── 5. Entrée Livermore (partielle) ───────────────────────────
+        risk_mgr.open_livermore_signal(signal)
+
+        logger.info(f"Execution du signal : {signal}")
+        try:
+            order       = await executor.submit(signal)
+            entry_price = float((order or {}).get("price", close_price) or close_price)
+        except Exception as exc:
+            logger.error(f"[{symbol}] Erreur execution ordre : {exc}")
+            await record_snapshot(risk_mgr._portfolio_value, len(risk_mgr._open_positions))
+            return
+
+        # ── 6. Enregistrement position + snapshot ─────────────────────
+        if signal.size:
+            risk_mgr.record_open(
+                signal.symbol, signal.action, signal.size,
+                entry_price, signal.stop_loss,
+            )
+
+        await record_snapshot(
+            risk_mgr._portfolio_value,
+            len(risk_mgr._open_positions),
+        )
+
+    # ------------------------------------------------------------------
+    # Enrichissement async
+    # ------------------------------------------------------------------
 
     async def _fetch_enrichments(
         self,
-        symbol: str,
+        symbol:          str,
         grok,
         ob_collector,
         sentiment_cache: dict,
@@ -180,7 +259,6 @@ class TradoEngine:
         """Récupère sentiment et imbalance OB en parallèle. Cache le sentiment 15 min."""
         now = time.monotonic()
 
-        # Sentiment : utilise le cache si récent
         cached = sentiment_cache.get(symbol)
         if cached and (now - cached[1]) < _SENTIMENT_REFRESH_S:
             sentiment_score = cached[0]
@@ -190,26 +268,24 @@ class TradoEngine:
 
         ob_task = ob_collector.fetch_imbalance(symbol) if ob_collector else None
 
-        # Lance les deux en parallèle
-        tasks = [t for t in (sentiment_task, ob_task) if t is not None]
+        tasks   = [t for t in (sentiment_task, ob_task) if t is not None]
         results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
 
         idx = 0
         if sentiment_task is not None:
-            val = results[idx]
+            val             = results[idx]
             sentiment_score = float(val) if not isinstance(val, Exception) else 0.0
             sentiment_cache[symbol] = (sentiment_score, now)
             idx += 1
 
         ob_imbalance = 0.0
         if ob_task is not None:
-            val = results[idx]
+            val          = results[idx]
             ob_imbalance = float(val) if not isinstance(val, Exception) else 0.0
 
         return sentiment_score, ob_imbalance
 
     async def _on_tick(self, tick: dict, strategy, risk_mgr, executor) -> None:
-        """Traite un tick en temps réel (hook pour stratégies tick-level)."""
         signal = strategy.on_tick(tick)
         if signal and risk_mgr.validate_signal(signal):
             await executor.submit(signal)
@@ -232,7 +308,7 @@ class TradoEngine:
         if self.strategy_name == "ai":
             from trading.strategies.ai_strategy import AIStrategy
             return AIStrategy(settings=self.settings, symbol=symbol)
-        raise ValueError(f"Stratégie inconnue : {self.strategy_name}")
+        raise ValueError(f"Strategie inconnue : {self.strategy_name}")
 
     def _build_risk_manager(self):
         from trading.risk.manager import RiskManager
