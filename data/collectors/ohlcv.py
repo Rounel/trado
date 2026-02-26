@@ -33,9 +33,42 @@ class OHLCVCollector:
         self,
         symbol: str = DEFAULT_SYMBOL,
         timeframe: str = DEFAULT_TIMEFRAME,
+        warmup_bars: int = 0,
     ) -> AsyncIterator[dict]:
-        """Génère en continu les dernières bougies fermées."""
+        """Génère en continu les dernières bougies fermées.
+
+        Si warmup_bars > 0, commence par émettre les N dernières bougies
+        historiques fermées (phase de warmup), puis passe en mode temps réel.
+        """
         logger.info(f"OHLCVCollector: streaming {symbol} @ {timeframe}")
+
+        # ── Phase warmup ──────────────────────────────────────────────────
+        if warmup_bars > 0:
+            try:
+                logger.info(
+                    f"OHLCVCollector: warmup {warmup_bars} bougies pour {symbol}"
+                )
+                df = await self.fetch_binance(symbol, timeframe, limit=warmup_bars + 1)
+                if not df.empty:
+                    # On exclut la dernière (bougie en cours, non fermée)
+                    for ts, row in df.iloc[:-1].iterrows():
+                        yield {
+                            "symbol":    symbol,
+                            "timeframe": timeframe,
+                            "timestamp": ts,
+                            "open":      row["open"],
+                            "high":      row["high"],
+                            "low":       row["low"],
+                            "close":     row["close"],
+                            "volume":    row["volume"],
+                        }
+                    logger.info(
+                        f"OHLCVCollector: warmup terminé — {len(df) - 1} bougies chargées"
+                    )
+            except Exception as exc:
+                logger.warning(f"OHLCVCollector warmup error: {exc}")
+
+        # ── Phase temps réel ──────────────────────────────────────────────
         while True:
             try:
                 bar = await self.fetch_binance_latest(symbol, timeframe)

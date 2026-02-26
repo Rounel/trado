@@ -35,6 +35,7 @@ class BinanceExecutor(BrokerExecutor):
     def __init__(self, settings: "Settings") -> None:
         super().__init__(settings)
         self._exchange = None
+        self._lot_filter_cache: dict[str, dict] = {}
 
     async def _get_exchange(self):
         if self._exchange is None:
@@ -71,6 +72,11 @@ class BinanceExecutor(BrokerExecutor):
         if qty <= 0:
             logger.warning("BinanceExecutor: quantite nulle — ordre ignore")
             return {"status": "skipped", "reason": "zero_quantity"}
+
+        # Validation et ajustement selon les filtres LOT_SIZE Binance
+        qty = await self._apply_lot_filter(signal.symbol, qty)
+        if qty is None:
+            return {"status": "skipped", "reason": "qty_below_min"}
 
         # Décision VWAP : compare la valeur estimée de l'ordre au seuil
         entry_price   = float(signal.entry_price or 0)
@@ -241,6 +247,50 @@ class BinanceExecutor(BrokerExecutor):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _get_lot_filter(self, symbol: str) -> dict:
+        """Retourne les filtres LOT_SIZE Binance pour un symbole (mis en cache)."""
+        if symbol not in self._lot_filter_cache:
+            try:
+                exchange = await self._get_exchange()
+                markets  = await exchange.load_markets()
+                mkt      = markets.get(symbol, {})
+                limits   = mkt.get("limits", {})
+                precision = mkt.get("precision", {})
+                self._lot_filter_cache[symbol] = {
+                    "min_qty":   float((limits.get("amount") or {}).get("min") or 0),
+                    "step_size": float(precision.get("amount") or 0),
+                }
+                logger.debug(
+                    f"LOT_SIZE [{symbol}]: min_qty={self._lot_filter_cache[symbol]['min_qty']}"
+                    f"  step_size={self._lot_filter_cache[symbol]['step_size']}"
+                )
+            except Exception as exc:
+                logger.warning(f"Impossible de charger les filtres LOT_SIZE pour {symbol}: {exc}")
+                self._lot_filter_cache[symbol] = {"min_qty": 0.0, "step_size": 0.0}
+        return self._lot_filter_cache[symbol]
+
+    async def _apply_lot_filter(self, symbol: str, qty: float) -> float | None:
+        """
+        Ajuste `qty` selon stepSize et vérifie le minQty Binance.
+        Retourne la quantité ajustée, ou None si elle est trop petite.
+        """
+        import math
+        lot = await self._get_lot_filter(symbol)
+        step = lot["step_size"]
+        min_q = lot["min_qty"]
+
+        if step > 0:
+            qty = math.floor(qty / step) * step
+            qty = round(qty, 8)
+
+        if min_q > 0 and qty < min_q:
+            logger.warning(
+                f"BinanceExecutor: quantité {qty:.8f} < minQty {min_q:.8f} "
+                f"pour {symbol} — ordre ignoré"
+            )
+            return None
+        return qty
 
     async def _place_stop_loss(self, exchange, signal: Signal, parent_order: dict) -> None:
         """Place un ordre Stop Loss après l'entrée."""

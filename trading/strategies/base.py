@@ -47,6 +47,11 @@ class BaseStrategy(ABC):
         """
         ...
 
+    @property
+    def warmup_bars(self) -> int:
+        """Nombre de bougies historiques nécessaires avant le premier signal."""
+        return 0
+
     def on_tick(self, tick: dict) -> Signal | None:
         """Hook optionnel pour les stratégies tick-level."""
         return None

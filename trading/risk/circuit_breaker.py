@@ -105,6 +105,23 @@ class CircuitBreaker:
         """Réinitialise le compteur de pertes consécutives."""
         self._consecutive_losses = 0
 
+    def sync_capital(self, real_value: float) -> None:
+        """Synchronise les valeurs de référence avec le solde réel du compte.
+
+        Appelé au démarrage et périodiquement pour corriger la dérive
+        entre le capital interne et le solde Binance réel.
+        """
+        if real_value <= 0:
+            return
+        self._current_value = real_value
+        self._peak_value    = max(self._peak_value, real_value)
+        # Si la journée vient de commencer ou que le daily_start n'a jamais été
+        # initialisé depuis un vrai solde, on le recale aussi.
+        if self._daily_start_value == self.initial_capital:
+            self._daily_start_value = real_value
+            self._intraday_peak     = real_value
+        logger.info(f"CircuitBreaker: capital synchronisé — {real_value:.2f} USDT")
+
     def reset(self) -> None:
         """Réinitialisation manuelle (ex: décision opérateur)."""
         self._paused              = False

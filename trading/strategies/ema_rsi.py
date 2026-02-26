@@ -52,6 +52,10 @@ class EmaRsiStrategy(BaseStrategy):
     def name(self) -> str:
         return "EmaRsiStrategy"
 
+    @property
+    def warmup_bars(self) -> int:
+        return self.WARMUP_BARS
+
     def on_bar(self, features: dict) -> Signal | None:
         """Traite une nouvelle bougie et retourne un signal si les conditions sont réunies."""
         self._buffer.append(features)

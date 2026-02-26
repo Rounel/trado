@@ -76,6 +76,13 @@ class RiskManager:
                 logger.warning(f"RiskManager: max positions atteint ({open_count})")
                 return False
 
+        # 2b. SELL spot : refuser si aucune position long ouverte pour ce symbole
+        if signal.action == "SELL" and signal.symbol not in self._open_positions:
+            logger.debug(
+                f"RiskManager: SELL refusé — aucune position ouverte pour {signal.symbol}"
+            )
+            return False
+
         # 3. Confiance minimale
         if signal.confidence < 0.3:
             logger.debug(f"RiskManager: confiance trop faible ({signal.confidence:.2f})")
@@ -342,6 +349,44 @@ class RiskManager:
             f"Portfolio={self._portfolio_value:.2f}$"
         )
         return pnl
+
+    def sync_balance(self, usdt_balance: float) -> None:
+        """Synchronise _portfolio_value avec le solde USDT réel depuis le broker.
+
+        À appeler au démarrage et périodiquement (ex: toutes les 10 bougies)
+        pour corriger la dérive entre le PnL interne et le compte réel.
+        """
+        if usdt_balance <= 0:
+            return
+        logger.info(f"RiskManager: solde synchronisé — {usdt_balance:.2f} USDT")
+        self._portfolio_value = usdt_balance
+        self._breaker.sync_capital(usdt_balance)
+
+    def restore_positions(self, positions: list[dict]) -> None:
+        """Restaure les positions ouvertes depuis le journal SQLite (redémarrage).
+
+        `positions` : liste de dicts avec les clés symbol, side, size, entry,
+                      trailing_stop (opt), trailing_activation (opt).
+        """
+        for pos in positions:
+            symbol = pos["symbol"]
+            self._open_positions[symbol] = {
+                "side":  pos["side"],
+                "size":  pos["size"],
+                "entry": pos["entry"],
+            }
+            if pos.get("trailing_stop") is not None:
+                self._trailing_stops[symbol] = pos["trailing_stop"]
+            if pos.get("trailing_activation") is not None:
+                self._trailing_activation[symbol] = pos["trailing_activation"]
+        if positions:
+            logger.info(
+                f"RiskManager: {len(positions)} position(s) restaurées depuis le journal"
+            )
+
+    def get_trailing_activation(self, symbol: str) -> float | None:
+        """Retourne le niveau d'activation du trailing stop pour un symbole."""
+        return self._trailing_activation.get(symbol)
 
     def update_portfolio(self, value: float) -> None:
         """Met à jour la valeur du portefeuille (ex: depuis un flux de prix)."""

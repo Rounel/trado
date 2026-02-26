@@ -22,7 +22,8 @@ from loguru import logger
 if TYPE_CHECKING:
     from config.settings import Settings
 
-_SENTIMENT_REFRESH_S = 900   # 15 minutes entre deux appels Grok par symbole
+_SENTIMENT_REFRESH_S  = 900   # 15 minutes entre deux appels Grok par symbole
+_BALANCE_SYNC_BARS    = 10    # resynchronisation du solde toutes les N bougies
 
 _DEFAULT_SYMBOLS: dict[str, list[str]] = {
     "binance": ["BTC/USDT"],
@@ -104,9 +105,19 @@ class TradoEngine:
 
     async def _run_symbol(self, symbol: str, executor) -> None:
         """Boucle indépendante pour un symbole donné."""
+        from data.pipeline.trade_journal import load_open_positions
+
         collector = self._build_collector()
         strategy  = self._build_strategy(symbol)
         risk_mgr  = self._build_risk_manager()
+
+        # ── Restauration des positions persistées ─────────────────────
+        saved_positions = await load_open_positions(symbol=symbol)
+        if saved_positions:
+            risk_mgr.restore_positions(saved_positions)
+
+        # ── Synchronisation initiale du solde réel ────────────────────
+        await self._sync_balance(executor, [risk_mgr])
 
         grok         = None
         ob_collector = None
@@ -117,10 +128,18 @@ class TradoEngine:
             ob_collector = OrderBookCollector(self.settings)
 
         sentiment_cache: dict[str, tuple[float, float]] = {}
+        bar_count = 0
 
         logger.info(f"[{symbol}] boucle démarrée ({self.timeframe})")
         try:
-            async for bar in collector.stream(symbol=symbol, timeframe=self.timeframe):
+            async for bar in collector.stream(
+                symbol=symbol,
+                timeframe=self.timeframe,
+                warmup_bars=strategy.warmup_bars,
+            ):
+                bar_count += 1
+                if bar_count % _BALANCE_SYNC_BARS == 0:
+                    await self._sync_balance(executor, [risk_mgr])
                 if not self._running:
                     break
                 await self._on_bar(
@@ -150,7 +169,10 @@ class TradoEngine:
     ) -> None:
         """Traite une nouvelle bougie OHLCV."""
         from data.pipeline.features import FeatureBuilder
-        from data.pipeline.trade_journal import record_closed_trade, record_snapshot
+        from data.pipeline.trade_journal import (
+            record_closed_trade, record_snapshot,
+            save_open_position, delete_open_position,
+        )
         from trading.strategies.base import Signal as TradoSignal
 
         features    = FeatureBuilder.from_bar(bar)
@@ -178,6 +200,7 @@ class TradoEngine:
                 logger.error(f"[{sym}] Erreur fermeture trailing stop : {exc}")
                 exit_price = close_price
             pnl = risk_mgr.record_close(sym, exit_price)
+            await delete_open_position(sym)
             if pos:
                 await record_closed_trade(
                     symbol=sym, side=pos["side"],
@@ -198,6 +221,13 @@ class TradoEngine:
                 risk_mgr.record_open(
                     symbol, reinforce.action, reinforce.size,
                     entry_price, reinforce.stop_loss,
+                )
+                await save_open_position(
+                    symbol=symbol, side=reinforce.action,
+                    size=reinforce.size, entry=entry_price,
+                    stop_loss=reinforce.stop_loss,
+                    trailing_stop=risk_mgr.get_trailing_stop(symbol),
+                    trailing_activation=risk_mgr.get_trailing_activation(symbol),
                 )
 
         # ── 3. Signal stratégie normal ─────────────────────────────────
@@ -238,6 +268,13 @@ class TradoEngine:
             risk_mgr.record_open(
                 signal.symbol, signal.action, signal.size,
                 entry_price, signal.stop_loss,
+            )
+            await save_open_position(
+                symbol=signal.symbol, side=signal.action,
+                size=signal.size, entry=entry_price,
+                stop_loss=signal.stop_loss,
+                trailing_stop=risk_mgr.get_trailing_stop(signal.symbol),
+                trailing_activation=risk_mgr.get_trailing_activation(signal.symbol),
             )
 
         await record_snapshot(
@@ -284,6 +321,17 @@ class TradoEngine:
             ob_imbalance = float(val) if not isinstance(val, Exception) else 0.0
 
         return sentiment_score, ob_imbalance
+
+    async def _sync_balance(self, executor, risk_managers: list) -> None:
+        """Récupère le solde USDT réel depuis le broker et le propage aux RiskManagers."""
+        try:
+            balance = await executor.get_balance()
+            usdt = float(balance.get("USDT", 0) or 0)
+            if usdt > 0:
+                for rm in risk_managers:
+                    rm.sync_balance(usdt)
+        except Exception as exc:
+            logger.warning(f"_sync_balance: impossible de récupérer le solde — {exc}")
 
     async def _on_tick(self, tick: dict, strategy, risk_mgr, executor) -> None:
         signal = strategy.on_tick(tick)

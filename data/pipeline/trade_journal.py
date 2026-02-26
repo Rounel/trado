@@ -39,6 +39,18 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     positions INTEGER DEFAULT 0
 )"""
 
+_CREATE_OPEN_POSITIONS = """
+CREATE TABLE IF NOT EXISTS open_positions (
+    symbol               TEXT PRIMARY KEY,
+    side                 TEXT NOT NULL,
+    size                 REAL NOT NULL,
+    entry                REAL NOT NULL,
+    stop_loss            REAL,
+    trailing_stop        REAL,
+    trailing_activation  REAL,
+    opened_at            TEXT NOT NULL
+)"""
+
 
 def _ensure_db_dir() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -54,6 +66,7 @@ def init_sync() -> None:
     con = sqlite3.connect(DB_PATH)
     con.execute(_CREATE_CLOSED_TRADES)
     con.execute(_CREATE_SNAPSHOTS)
+    con.execute(_CREATE_OPEN_POSITIONS)
     con.commit()
     con.close()
 
@@ -64,6 +77,7 @@ async def init_async() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_CREATE_CLOSED_TRADES)
         await db.execute(_CREATE_SNAPSHOTS)
+        await db.execute(_CREATE_OPEN_POSITIONS)
         await db.commit()
 
 
@@ -111,6 +125,76 @@ async def record_snapshot(value: float, positions: int = 0) -> None:
             await db.commit()
     except Exception as exc:
         logger.warning(f"TradeJournal.record_snapshot: {exc}")
+
+
+# ──────────────────────────────────────────────────────────────
+# Positions ouvertes — persistance inter-sessions
+# ──────────────────────────────────────────────────────────────
+
+async def save_open_position(
+    symbol:              str,
+    side:                str,
+    size:                float,
+    entry:               float,
+    stop_loss:           float | None = None,
+    trailing_stop:       float | None = None,
+    trailing_activation: float | None = None,
+) -> None:
+    """Insère ou met à jour une position ouverte (upsert par symbole)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO open_positions
+                   (symbol, side, size, entry, stop_loss, trailing_stop,
+                    trailing_activation, opened_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                     side=excluded.side, size=excluded.size,
+                     entry=excluded.entry, stop_loss=excluded.stop_loss,
+                     trailing_stop=excluded.trailing_stop,
+                     trailing_activation=excluded.trailing_activation""",
+                (
+                    symbol, side,
+                    round(size, 8), round(entry, 6),
+                    round(stop_loss, 6) if stop_loss is not None else None,
+                    round(trailing_stop, 6) if trailing_stop is not None else None,
+                    round(trailing_activation, 6) if trailing_activation is not None else None,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning(f"TradeJournal.save_open_position [{symbol}]: {exc}")
+
+
+async def delete_open_position(symbol: str) -> None:
+    """Supprime une position fermée du journal."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM open_positions WHERE symbol = ?", (symbol,))
+            await db.commit()
+    except Exception as exc:
+        logger.warning(f"TradeJournal.delete_open_position [{symbol}]: {exc}")
+
+
+async def load_open_positions(symbol: str | None = None) -> list[dict]:
+    """
+    Charge les positions ouvertes depuis le journal.
+    Si `symbol` est fourni, ne retourne que celle de ce symbole.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            if symbol:
+                rows = await db.execute_fetchall(
+                    "SELECT * FROM open_positions WHERE symbol = ?", (symbol,)
+                )
+            else:
+                rows = await db.execute_fetchall("SELECT * FROM open_positions")
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        logger.warning(f"TradeJournal.load_open_positions: {exc}")
+        return []
 
 
 # ──────────────────────────────────────────────────────────────
