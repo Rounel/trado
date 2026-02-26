@@ -77,7 +77,7 @@ class OHLCVCollector:
             return {
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "timestamp": row["timestamp"],
+                "timestamp": row.name,  # index après set_index("timestamp")
                 "open": row["open"],
                 "high": row["high"],
                 "low": row["low"],
