@@ -31,7 +31,8 @@
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe -c \"\nimport tomllib\nwith open\\('pyproject.toml', 'rb'\\) as f:\n    data = tomllib.load\\(f\\)\ndeps = data['project']['dependencies']\n# Ecrire requirements.txt\nwith open\\('requirements.txt', 'w', encoding='utf-8'\\) as f:\n    f.write\\('# requirements.txt — genere depuis pyproject.toml\\\\n'\\)\n    f.write\\('# Utilise par launcher.py au premier demarrage\\\\n\\\\n'\\)\n    for d in deps:\n        f.write\\(d + '\\\\n'\\)\nprint\\('requirements.txt genere :', len\\(deps\\), 'packages'\\)\n\")",
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe -c \"\nfrom monitoring.bot_manager import BotManager\nb = BotManager\\(\\)\nprint\\('is_running:', b.is_running\\(\\)\\)\nprint\\('status:', b.status\\(\\)\\)\nprint\\('logs \\(3 lignes\\):', b.get_logs\\(3\\)\\)\nprint\\('BotManager OK'\\)\n\")",
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe -c \"\nimport ast, sys\n# Vérifier que launcher.py parse sans erreur\nwith open\\('launcher.py', 'r', encoding='utf-8'\\) as f:\n    src = f.read\\(\\)\nast.parse\\(src\\)\nprint\\('launcher.py : syntaxe OK'\\)\n\")",
-      "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe scripts/make_icon.py && .venv/Scripts/python.exe scripts/make_requirements.py)"
+      "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe scripts/make_icon.py && .venv/Scripts/python.exe scripts/make_requirements.py)",
+      "Bash(test:*)"
     ]
   }
 }

@@ -123,9 +123,11 @@ class TradoEngine:
         ob_collector = None
         if self.strategy_name == "ai":
             from analysis.sentiment.grok_analyzer import GrokAnalyzer
-            from data.collectors.orderbook import OrderBookCollector
-            grok         = GrokAnalyzer(self.settings)
-            ob_collector = OrderBookCollector(self.settings)
+            grok = GrokAnalyzer(self.settings)
+            # OrderBookCollector est Binance-only (crypto) — inutile pour MT5/Forex
+            if self.broker != "mt5":
+                from data.collectors.orderbook import OrderBookCollector
+                ob_collector = OrderBookCollector(self.settings)
 
         sentiment_cache: dict[str, tuple[float, float]] = {}
         bar_count = 0

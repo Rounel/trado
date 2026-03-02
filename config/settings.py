@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BinanceConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="BINANCE_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="BINANCE_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     api_key: str = Field(default="", description="Binance API key")
     secret: str = Field(default="", description="Binance secret")
@@ -28,7 +28,7 @@ class BinanceConfig(BaseSettings):
 
 
 class AlpacaConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ALPACA_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ALPACA_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     api_key: str = Field(default="", description="Alpaca API key")
     secret: str = Field(default="", description="Alpaca secret")
@@ -39,7 +39,7 @@ class AlpacaConfig(BaseSettings):
 
 
 class GrokConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GROK_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="GROK_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     api_key: str = Field(default="", description="xAI Grok API key")
     base_url: str = Field(default="https://api.x.ai/v1")
@@ -47,20 +47,20 @@ class GrokConfig(BaseSettings):
 
 
 class RedisConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="REDIS_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="REDIS_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     url: str = Field(default="redis://localhost:6379/0")
 
 
 class TelegramConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TELEGRAM_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="TELEGRAM_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     token: str = Field(default="")
     chat_id: str = Field(default="")
 
 
 class MT5Config(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MT5_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MT5_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     login: int = Field(default=0, description="Numéro de compte MT5")
     password: str = Field(default="", description="Mot de passe MT5")
@@ -71,7 +71,7 @@ class MT5Config(BaseSettings):
 
 
 class RiskConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="RISK_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="RISK_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     max_drawdown_pct: float = Field(default=10.0, description="Drawdown max avant circuit breaker (%)")
     max_daily_loss_pct: float = Field(default=3.0, description="Perte journalière max (%)")

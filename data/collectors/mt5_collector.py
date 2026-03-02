@@ -90,9 +90,23 @@ class MT5Collector:
         self,
         symbol: str = DEFAULT_SYMBOL,
         timeframe: str = DEFAULT_TIMEFRAME,
+        warmup_bars: int = 0,
     ) -> AsyncIterator[dict]:
         """Génère en continu les dernières bougies fermées depuis MT5."""
         logger.info(f"MT5Collector: streaming {symbol} @ {timeframe}")
+        if warmup_bars > 0:
+            df = await self.fetch(symbol, timeframe, limit=warmup_bars + 1)
+            for ts, row in df.iloc[:-1].iterrows():
+                yield {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": ts,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
         while True:
             try:
                 bar = await self.fetch_latest(symbol, timeframe)
@@ -112,9 +126,19 @@ class MT5Collector:
         symbol: str = DEFAULT_SYMBOL,
         timeframe: str = DEFAULT_TIMEFRAME,
         limit: int = DEFAULT_LIMIT,
+        timeout: float = 15.0,
     ) -> pd.DataFrame:
         """Récupère `limit` bougies OHLCV depuis MT5."""
-        return await asyncio.to_thread(self._fetch_sync, symbol, timeframe, limit)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_sync, symbol, timeframe, limit),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"MT5Collector: timeout ({timeout}s) — terminal MT5 ouvert et connecté ?"
+            )
+            return pd.DataFrame()
 
     def _fetch_sync(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
         import MetaTrader5 as mt5  # type: ignore[import]
@@ -123,11 +147,21 @@ class MT5Collector:
         mt5_symbol = _normalize_symbol(symbol)
         tf = self._resolve_timeframe(timeframe)
 
-        mt5.symbol_select(mt5_symbol, True)
+        selected = mt5.symbol_select(mt5_symbol, True)
+        if not selected:
+            logger.warning(f"MT5Collector: symbol_select échoué pour {mt5_symbol} — {mt5.last_error()}")
+
+        info = mt5.terminal_info()
+        if info and not info.connected:
+            logger.warning(f"MT5Collector: terminal non connecté au broker ({mt5.last_error()})")
+
         rates = mt5.copy_rates_from_pos(mt5_symbol, tf, 0, limit)
 
         if rates is None or len(rates) == 0:
-            logger.warning(f"MT5Collector: aucune donnée pour {mt5_symbol} {timeframe}")
+            logger.warning(
+                f"MT5Collector: aucune donnée pour {mt5_symbol} {timeframe} — "
+                f"last_error={mt5.last_error()}"
+            )
             return pd.DataFrame()
 
         df = pd.DataFrame(rates)
