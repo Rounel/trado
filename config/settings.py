@@ -70,6 +70,27 @@ class MT5Config(BaseSettings):
     enabled: bool = Field(default=False, description="True = utiliser MT5 comme broker actif")
 
 
+class NewsConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="NEWS_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    newsapi_key: str = Field(default="", description="Clé NewsAPI (newsapi.org)")
+    cryptopanic_key: str = Field(default="", description="Clé CryptoPanic API")
+    max_headlines: int = Field(default=5, description="Nombre max de titres injectés dans Grok")
+    refresh_interval_s: int = Field(default=300, description="Intervalle de rafraîchissement news (s)")
+
+
+class MacroFilterConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="MACRO_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    enabled: bool = Field(default=True, description="Active le filtre macro (blackout + vol_mult)")
+    blackout_before_min: int = Field(default=30, description="Minutes AVANT un événement High pour déclencher le blackout")
+    blackout_after_min: int = Field(default=15, description="Minutes APRÈS un événement High pour maintenir le blackout")
+    min_impact: str = Field(default="High", description="Impact minimum pour blackout : High | Medium")
+    vol_mult_medium: float = Field(default=1.3, description="Multiplicateur ATR pour événements Medium")
+    vol_mult_high: float = Field(default=2.0, description="Multiplicateur ATR pour événements High")
+    calendar_horizon_hours: int = Field(default=48, description="Fenêtre de lecture du calendrier (h)")
+
+
 class RiskConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RISK_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -120,3 +141,5 @@ class Settings(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
+    macro: MacroFilterConfig = Field(default_factory=MacroFilterConfig)

@@ -2,7 +2,7 @@
 TRADO — Entrypoint CLI
 
 Usage:
-  python main.py run [--broker binance|alpaca|mt5] [--strategy ema_rsi|ai]
+  python main.py run [--broker binance|alpaca|mt5] [--strategy ema_rsi|ai|advanced]
                      [--symbols SYM1 SYM2 ...] [--timeframe 1m|5m|15m|30m|1h|4h|1d]
                      [--env paper|live]
 
@@ -24,7 +24,7 @@ def cli_run() -> None:
     """Lance le moteur de trading en temps réel."""
     parser = _base_parser("run")
     parser.add_argument("--env",       choices=["paper", "live"], default="paper")
-    parser.add_argument("--strategy",  choices=["ema_rsi", "ai"], default="ai")
+    parser.add_argument("--strategy",  choices=["ema_rsi", "ai", "advanced"], default="ema_rsi")
     parser.add_argument("--broker",    choices=["binance", "alpaca", "mt5"], default="binance")
     parser.add_argument("--symbols",   nargs="+", default=None,
                         metavar="SYMBOL",
@@ -59,7 +59,7 @@ def cli_run() -> None:
 def cli_backtest() -> None:
     """Lance un backtest VectorBT sur données historiques."""
     parser = _base_parser("backtest")
-    parser.add_argument("--strategy", required=True, choices=["ema_rsi", "ai"])
+    parser.add_argument("--strategy", required=True, choices=["ema_rsi", "ai", "advanced"])
     parser.add_argument("--symbol", default="BTC/USDT")
     parser.add_argument("--start", default="2024-01-01")
     parser.add_argument("--end",   default="2024-12-31")
@@ -134,7 +134,7 @@ def cli_train() -> None:
 def cli_stress_test() -> None:
     """Stress test sur des crises historiques (COVID, LUNA, FTX, Bear 2018…)."""
     parser = _base_parser("stress-test")
-    parser.add_argument("--strategy", choices=["ema_rsi", "ai"], default="ema_rsi")
+    parser.add_argument("--strategy", choices=["ema_rsi", "ai", "advanced"], default="ema_rsi")
     parser.add_argument("--symbol",   default="BTC/USDT")
     parser.add_argument("--scenarios", nargs="*", default=None,
                         metavar="SCENARIO",

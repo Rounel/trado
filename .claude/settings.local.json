@@ -32,7 +32,10 @@
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe -c \"\nfrom monitoring.bot_manager import BotManager\nb = BotManager\\(\\)\nprint\\('is_running:', b.is_running\\(\\)\\)\nprint\\('status:', b.status\\(\\)\\)\nprint\\('logs \\(3 lignes\\):', b.get_logs\\(3\\)\\)\nprint\\('BotManager OK'\\)\n\")",
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe -c \"\nimport ast, sys\n# Vérifier que launcher.py parse sans erreur\nwith open\\('launcher.py', 'r', encoding='utf-8'\\) as f:\n    src = f.read\\(\\)\nast.parse\\(src\\)\nprint\\('launcher.py : syntaxe OK'\\)\n\")",
       "Bash(cd /c/Users/fabel/Documents/Ivoire_Node/SaaS/Trado && .venv/Scripts/python.exe scripts/make_icon.py && .venv/Scripts/python.exe scripts/make_requirements.py)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(uv run:*)",
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
     ]
   }
 }

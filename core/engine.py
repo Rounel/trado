@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 _SENTIMENT_REFRESH_S  = 900   # 15 minutes entre deux appels Grok par symbole
 _BALANCE_SYNC_BARS    = 10    # resynchronisation du solde toutes les N bougies
+_CALENDAR_REFRESH_S   = 4 * 3600  # rafraîchissement du calendrier toutes les 4h
+_NEWS_REFRESH_S       = 300       # rafraîchissement des news toutes les 5 min
 
 _DEFAULT_SYMBOLS: dict[str, list[str]] = {
     "binance": ["BTC/USDT"],
@@ -121,7 +123,7 @@ class TradoEngine:
 
         grok         = None
         ob_collector = None
-        if self.strategy_name == "ai":
+        if self.strategy_name in ("ai", "advanced"):
             from analysis.sentiment.grok_analyzer import GrokAnalyzer
             grok = GrokAnalyzer(self.settings)
             # OrderBookCollector est Binance-only (crypto) — inutile pour MT5/Forex
@@ -129,7 +131,39 @@ class TradoEngine:
                 from data.collectors.orderbook import OrderBookCollector
                 ob_collector = OrderBookCollector(self.settings)
 
+        # ── Modules macro (calendrier + news + filtre) ─────────────────
+        from analysis.sentiment.context_builder import ContextBuilder
+        from analysis.sentiment.macro_filter import MacroFilter
+        from data.collectors.economic_calendar import EconomicCalendarCollector
+        from data.collectors.news_feed import NewsFeedCollector
+
+        macro_cfg      = self.settings.macro
+        calendar_col   = EconomicCalendarCollector(
+            settings=self.settings,
+            horizon_hours=macro_cfg.calendar_horizon_hours,
+            min_impact=macro_cfg.min_impact,
+        )
+        news_col       = NewsFeedCollector(
+            settings=self.settings,
+            max_headlines=self.settings.news.max_headlines,
+            cache_ttl_s=self.settings.news.refresh_interval_s,
+        )
+        macro_filter   = MacroFilter(
+            blackout_before_min=macro_cfg.blackout_before_min,
+            blackout_after_min=macro_cfg.blackout_after_min,
+            min_impact=macro_cfg.min_impact,
+            vol_mult_medium=macro_cfg.vol_mult_medium,
+            vol_mult_high=macro_cfg.vol_mult_high,
+        )
+        ctx_builder    = ContextBuilder(
+            max_headlines=self.settings.news.max_headlines,
+        )
+
+        # Pré-chargement du calendrier
+        calendar_events: list = await calendar_col.fetch()
+
         sentiment_cache: dict[str, tuple[float, float]] = {}
+        news_cache:      dict[str, tuple[list, float]]  = {}
         bar_count = 0
 
         logger.info(f"[{symbol}] boucle démarrée ({self.timeframe})")
@@ -142,6 +176,8 @@ class TradoEngine:
                 bar_count += 1
                 if bar_count % _BALANCE_SYNC_BARS == 0:
                     await self._sync_balance(executor, [risk_mgr])
+                    # Rafraîchir le calendrier périodiquement
+                    calendar_events = await calendar_col.fetch()
                 if not self._running:
                     break
                 await self._on_bar(
@@ -149,6 +185,11 @@ class TradoEngine:
                     grok=grok,
                     ob_collector=ob_collector,
                     sentiment_cache=sentiment_cache,
+                    news_cache=news_cache,
+                    calendar_events=calendar_events,
+                    news_col=news_col,
+                    macro_filter=macro_filter,
+                    ctx_builder=ctx_builder,
                 )
         except asyncio.CancelledError:
             logger.info(f"[{symbol}] boucle arrêtée")
@@ -161,13 +202,18 @@ class TradoEngine:
 
     async def _on_bar(
         self,
-        bar:            dict,
+        bar:             dict,
         strategy,
         risk_mgr,
         executor,
         grok=None,
         ob_collector=None,
         sentiment_cache: dict | None = None,
+        news_cache:      dict | None = None,
+        calendar_events: list | None = None,
+        news_col=None,
+        macro_filter=None,
+        ctx_builder=None,
     ) -> None:
         """Traite une nouvelle bougie OHLCV."""
         from data.pipeline.features import FeatureBuilder
@@ -181,10 +227,36 @@ class TradoEngine:
         symbol      = bar.get("symbol", "")
         close_price = float(bar.get("close", 0) or 0)
 
-        # Enrichissement async (sentiment + order book en parallèle)
+        # ── Filtre macro : blackout + vol_multiplier ───────────────────
+        macro_ctx      = None
+        vol_multiplier = 1.0
+        if macro_filter is not None and calendar_events is not None:
+            macro_ctx = macro_filter.evaluate(symbol, calendar_events)
+            vol_multiplier = macro_ctx.vol_multiplier
+            if macro_ctx.is_blackout and self.settings.macro.enabled:
+                logger.warning(
+                    f"[{symbol}] Signal BLOQUÉ — {macro_ctx.reason}"
+                )
+                await record_snapshot(
+                    risk_mgr._portfolio_value,
+                    len(risk_mgr._open_positions),
+                )
+                return
+        features["vol_multiplier"] = vol_multiplier
+
+        # ── Enrichissement async (sentiment + order book en parallèle) ─
         if grok is not None or ob_collector is not None:
             sentiment_score, ob_imbalance = await self._fetch_enrichments(
-                symbol, grok, ob_collector, sentiment_cache or {}
+                symbol=symbol,
+                grok=grok,
+                ob_collector=ob_collector,
+                sentiment_cache=sentiment_cache or {},
+                news_cache=news_cache or {},
+                news_col=news_col,
+                calendar_events=calendar_events or [],
+                macro_ctx=macro_ctx,
+                ctx_builder=ctx_builder,
+                current_price=close_price,
             )
             features["sentiment_score"] = sentiment_score
             features["ob_imbalance"]    = ob_imbalance
@@ -294,16 +366,65 @@ class TradoEngine:
         grok,
         ob_collector,
         sentiment_cache: dict,
+        news_cache:      dict | None = None,
+        news_col=None,
+        calendar_events: list | None = None,
+        macro_ctx=None,
+        ctx_builder=None,
+        current_price:   float = 0.0,
     ) -> tuple[float, float]:
-        """Récupère sentiment et imbalance OB en parallèle. Cache le sentiment 15 min."""
-        now = time.monotonic()
+        """
+        Récupère sentiment et imbalance OB en parallèle.
 
-        cached = sentiment_cache.get(symbol)
-        if cached and (now - cached[1]) < _SENTIMENT_REFRESH_S:
-            sentiment_score = cached[0]
+        Nouveautés :
+          - Fetche les headlines de news (avec cache 5 min).
+          - Construit un contexte enrichi (news + événements macro) pour Grok.
+          - Si blackout imminent, utilise un contexte d'alerte spécifique.
+        """
+        now = time.monotonic()
+        news_cache = news_cache or {}
+
+        # ── News headlines ─────────────────────────────────────────────
+        headlines: list[str] = []
+        if news_col is not None:
+            cached_news = news_cache.get(symbol)
+            if cached_news and (now - cached_news[1]) < _NEWS_REFRESH_S:
+                headlines = cached_news[0]
+            else:
+                try:
+                    headlines = await news_col.fetch_headlines(symbol)
+                    news_cache[symbol] = (headlines, now)
+                except Exception as exc:
+                    logger.debug(f"NewsFeed error: {exc}")
+
+        # ── Construction du contexte Grok ──────────────────────────────
+        context = ""
+        if ctx_builder is not None:
+            ev_list = (
+                calendar_events
+                if not (macro_ctx and macro_ctx.imminent_events)
+                else None
+            )
+            if macro_ctx and macro_ctx.is_blackout:
+                context = ctx_builder.build_blackout_context(
+                    symbol, macro_ctx.reason, macro_ctx.imminent_events
+                )
+            else:
+                context = ctx_builder.build(
+                    symbol=symbol,
+                    headlines=headlines,
+                    events=ev_list,
+                    current_price=current_price,
+                )
+
+        # ── Sentiment Grok (avec cache 15 min) ─────────────────────────
+        sentiment_score = 0.0
+        cached_sent = sentiment_cache.get(symbol)
+        if cached_sent and (now - cached_sent[1]) < _SENTIMENT_REFRESH_S:
+            sentiment_score = cached_sent[0]
             sentiment_task  = None
         else:
-            sentiment_task = grok.score(symbol) if grok else None
+            sentiment_task = grok.score(symbol, context=context) if grok else None
 
         ob_task = ob_collector.fetch_imbalance(symbol) if ob_collector else None
 
@@ -358,6 +479,9 @@ class TradoEngine:
         if self.strategy_name == "ai":
             from trading.strategies.ai_strategy import AIStrategy
             return AIStrategy(settings=self.settings, symbol=symbol)
+        if self.strategy_name == "advanced":
+            from trading.strategies.advanced_strategy import AdvancedStrategy
+            return AdvancedStrategy(settings=self.settings, symbol=symbol)
         raise ValueError(f"Strategie inconnue : {self.strategy_name}")
 
     def _build_risk_manager(self):

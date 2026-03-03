@@ -1,6 +1,6 @@
 # TRADO — Bot de Trading IA
 
-Bot de trading algorithmique multi-broker combinant analyse technique, intelligence artificielle, sentiment de marché et gestion du risque dynamique.
+Bot de trading algorithmique multi-broker combinant analyse technique avancée (PA/SMC/OTE/IFC), intelligence artificielle, filtrage macro-économique et gestion du risque dynamique.
 
 ---
 
@@ -13,24 +13,30 @@ Bot de trading algorithmique multi-broker combinant analyse technique, intellige
 5. [Configuration](#configuration)
 6. [Utilisation](#utilisation)
 7. [Stratégies](#stratégies)
-8. [Entraînement des modèles IA](#entraînement-des-modèles-ia)
-9. [Backtesting & Stress Tests](#backtesting--stress-tests)
-10. [Dashboard](#dashboard)
-11. [Gestion du risque](#gestion-du-risque)
-12. [Brokers supportés](#brokers-supportés)
+8. [Modules d'analyse avancée](#modules-danalyse-avancée)
+9. [Entraînement des modèles IA](#entraînement-des-modèles-ia)
+10. [Backtesting & Stress Tests](#backtesting--stress-tests)
+11. [Dashboard](#dashboard)
+12. [Gestion du risque](#gestion-du-risque)
+13. [Tests](#tests)
+14. [Brokers supportés](#brokers-supportés)
 
 ---
 
 ## Vue d'ensemble
 
-TRADO est un bot de trading automatisé conçu pour opérer sur plusieurs marchés simultanément (crypto, forex, actions US). Il repose sur quatre couches d'analyse fusionnées dynamiquement selon le régime de marché détecté :
+TRADO est un bot de trading automatisé conçu pour opérer sur plusieurs marchés simultanément (crypto, actions US). Il repose sur quatre couches d'analyse fusionnées dynamiquement selon le régime de marché détecté :
 
-- **Analyse technique** — EMA, RSI, MACD, Bollinger Bands, ATR, ADX
-- **Intelligence artificielle** — Temporal Fusion Transformer (TFT) + agent par renforcement (PPO)
-- **Sentiment** — xAI Grok ou FinBERT (spécialisé finance)
+- **Analyse technique** — EMA, RSI, MACD, Bollinger Bands, ATR, ADX + Price Action / SMC / OTE / IFC
+- **Intelligence artificielle** — Temporal Fusion Transformer (TFT) + agent par renforcement (PPO) + Meta-Labeling
+- **Sentiment & Macro** — xAI Grok, FinBERT, flux de news, calendrier économique
 - **Order Book** — imbalance bid/ask en temps réel
 
 Les poids de chaque couche s'adaptent automatiquement au régime de marché (tendance, range, volatilité extrême).
+
+```
+W_TECH = 0.35  |  W_AI = 0.40  |  W_SENTIMENT = 0.15  |  W_ORDERBOOK = 0.10
+```
 
 ---
 
@@ -38,43 +44,72 @@ Les poids de chaque couche s'adaptent automatiquement au régime de marché (ten
 
 ```
 trado/
-├── config/settings.py          Configuration centralisée (Pydantic Settings)
-├── core/engine.py              Orchestrateur async — une tâche par symbole
+├── config/settings.py              Configuration centralisée (Pydantic Settings)
+│                                   BinanceConfig, AlpacaConfig, GrokConfig, RedisConfig,
+│                                   TelegramConfig, RiskConfig, NewsConfig, MacroFilterConfig
+├── core/engine.py                  Orchestrateur async — une tâche par symbole
 │
 ├── data/
-│   ├── collectors/             OHLCV, Order Book, Grok, MT5, On-chain
-│   └── pipeline/               Features, normalisation, cache
+│   ├── collectors/
+│   │   ├── ohlcv.py                Données OHLCV (ccxt.pro)
+│   │   ├── orderbook.py            Order Book temps réel
+│   │   ├── grok.py                 Sentiment xAI Grok
+│   │   ├── onchain.py              Données on-chain
+│   │   ├── economic_calendar.py    Calendrier macro-économique (NFP, CPI, FOMC…)
+│   │   └── news_feed.py            Flux de news (RSS / API)
+│   └── pipeline/                   Features, normalisation, cache (Redis + SQLite)
 │
 ├── analysis/
-│   ├── technical/indicators.py RSI, EMA, MACD, BB, ATR, ADX
-│   ├── regime/detector.py      Détection régime (trend/range/volatile)
-│   ├── sentiment/              Grok API + FinBERT local
-│   └── aggregator/signal_fusion.py  Fusion pondérée adaptative
+│   ├── technical/
+│   │   ├── indicators.py           RSI, EMA, MACD, Bollinger Bands, ATR, ADX
+│   │   ├── price_action.py         Structure de marché (BOS, CHOCH, tendance)
+│   │   ├── smc.py                  Smart Money Concepts (Order Blocks, FVG, Liquidité, Stop Hunt)
+│   │   ├── ote.py                  Optimal Trade Entry (retracement Fibonacci 61,8 %–78,6 %)
+│   │   └── ifc.py                  Confirmation bougies (Pin Bar, Engulfing, Doji…)
+│   ├── sentiment/
+│   │   ├── grok_analyzer.py        Analyse Grok / FinBERT
+│   │   ├── macro_filter.py         Filtre macro : blackout avant/après événements High
+│   │   └── context_builder.py      Contextualisation news + macro par symbole
+│   └── signal_fusion.py            Fusion pondérée adaptative (4 couches)
 │
 ├── models/
-│   ├── tft/                    Temporal Fusion Transformer (PyTorch)
-│   ├── rl_agent/               Agent PPO (Stable-Baselines3)
-│   ├── lstm/                   LSTM (PyTorch)
-│   ├── xgboost/                XGBoost classifier
-│   └── ensemble.py             Combinaison des modèles
+│   ├── base.py                     Interface abstraite (fit/predict/save/load)
+│   ├── lstm.py                     LSTM (PyTorch)
+│   ├── tft.py                      Temporal Fusion Transformer (PyTorch)
+│   ├── xgboost_model.py            XGBoost classifier
+│   ├── rl_agent.py                 Agent PPO (Stable-Baselines3)
+│   ├── ensemble.py                 Combinaison des modèles
+│   └── meta_labeling.py            Meta-Labeling (filtre probabilité de profit PoP)
 │
 ├── trading/
-│   ├── strategies/             ema_rsi, ai_strategy
-│   ├── risk/                   RiskManager, CircuitBreaker, PositionSizer
-│   └── executor/               Binance, Alpaca, MetaTrader 5
+│   ├── strategies/
+│   │   ├── base.py                 Interface BaseStrategy + dataclass Signal
+│   │   ├── ema_rsi.py              Stratégie technique pure
+│   │   ├── ai_strategy.py          Stratégie IA 4 couches
+│   │   └── advanced_strategy.py    Stratégie PA + SMC + OTE + IFC + Meta-Labeling
+│   ├── risk/
+│   │   ├── manager.py              RiskManager (validation pré-trade)
+│   │   ├── sizing.py               PositionSizer (Kelly + ATR)
+│   │   └── circuit_breaker.py      Disjoncteur automatique
+│   └── executor/
+│       ├── binance.py              Exécution ccxt.pro (WebSocket)
+│       └── alpaca.py               Exécution Alpaca
 │
 ├── backtest/
-│   ├── engine.py               Simulation barre par barre
-│   ├── wfo.py                  Walk-Forward Optimization
-│   ├── stress_test.py          7 scénarios de crise historiques
-│   └── metrics.py              Sharpe, Sortino, Calmar, Profit Factor
+│   ├── engine.py                   Simulation barre par barre
+│   ├── wfo.py                      Walk-Forward Optimization
+│   └── metrics.py                  Sharpe, Sortino, Calmar, Profit Factor
 │
-├── training/pipeline.py        Pipeline TFT + RL avec WFO et cross-validation
 ├── monitoring/
-│   ├── dashboard.py            Dashboard Streamlit temps réel
-│   └── pages/configuration.py Interface de configuration graphique
+│   ├── dashboard.py                Dashboard Streamlit temps réel
+│   ├── alerts.py                   Alertes Telegram
+│   └── logger.py                   Loguru
 │
-└── main.py                     Entrypoint CLI
+├── tests/
+│   ├── unit/                       117 tests (pytest)
+│   └── integration/                Pipeline, features, RL env
+│
+└── main.py                         Entrypoint CLI
 ```
 
 ---
@@ -83,8 +118,6 @@ trado/
 
 - **Python** ≥ 3.11
 - **uv** (gestionnaire de paquets)
-- **Windows** (requis pour MetaTrader 5 uniquement)
-- Terminal MetaTrader 5 installé (si broker MT5)
 
 ---
 
@@ -118,11 +151,12 @@ uv sync --extra finbert
 python main.py dashboard
 ```
 
-Cliquer sur **"Configuration"** dans la sidebar pour accéder aux 4 onglets :
-- **Brokers** — clés API Binance, Alpaca, MetaTrader 5
+Cliquer sur **"Configuration"** dans la sidebar pour accéder aux onglets :
+- **Brokers** — clés API Binance, Alpaca
 - **Gestion du risque** — capital, circuit breakers, SL/TP
 - **Stratégie & Modèles** — stratégie par défaut, chemins des modèles IA
 - **Intégrations** — Grok, Telegram, Redis, logs
+- **Macro** — blackout avant/après événements, seuil d'impact, multiplicateurs de volatilité
 
 ### Via le fichier `.env`
 
@@ -137,12 +171,6 @@ ALPACA_API_KEY=votre_cle
 ALPACA_SECRET=votre_secret
 ALPACA_BASE_URL=https://paper-api.alpaca.markets
 
-# ── MetaTrader 5 ─────────────────────────────
-MT5_LOGIN=12345678
-MT5_PASSWORD=votre_mot_de_passe
-MT5_SERVER=ICMarkets-Demo
-MT5_ENABLED=false
-
 # ── Sentiment Grok ───────────────────────────
 GROK_API_KEY=votre_cle_grok
 
@@ -156,6 +184,15 @@ RISK_MAX_DRAWDOWN_PCT=10.0
 RISK_MAX_DAILY_LOSS_PCT=3.0
 RISK_MAX_POSITIONS=5
 
+# ── Filtre macro ─────────────────────────────
+MACRO_BLACKOUT_BEFORE_MIN=30
+MACRO_BLACKOUT_AFTER_MIN=15
+MACRO_MIN_IMPACT=High
+
+# ── News ─────────────────────────────────────
+NEWS_MAX_AGE_HOURS=4
+NEWS_REFRESH_INTERVAL_MIN=15
+
 # ── App ──────────────────────────────────────
 ENV=paper                     # paper | live
 LOG_LEVEL=INFO
@@ -168,28 +205,28 @@ LOG_LEVEL=INFO
 ### Lancer le bot
 
 ```bash
-# Crypto — BTC/USDT (défaut)
+# Crypto — BTC/USDT (défaut, stratégie ema_rsi)
 python main.py run
 
-# Multi-symbole crypto
-python main.py run --broker binance --symbols BTC/USDT ETH/USDT SOL/USDT
+# Multi-symbole avec stratégie avancée PA/SMC/OTE/IFC
+python main.py run --strategy advanced --symbols BTC/USDT ETH/USDT
 
-# Forex via MetaTrader 5
-python main.py run --broker mt5 --symbols EURUSD GBPUSD USDJPY --timeframe 15m
+# Stratégie IA complète (4 couches)
+python main.py run --strategy ai --broker binance --symbols BTC/USDT ETH/USDT SOL/USDT
 
 # Actions US via Alpaca
 python main.py run --broker alpaca --symbols AAPL TSLA NVDA
 
-# Stratégie technique uniquement (plus simple, moins de dépendances)
-python main.py run --strategy ema_rsi
+# Mode live
+python main.py run --env live --strategy advanced
 ```
 
 ### Options disponibles
 
 | Option | Valeurs | Défaut | Description |
 |---|---|---|---|
-| `--broker` | `binance` `alpaca` `mt5` | `binance` | Broker d'exécution |
-| `--strategy` | `ai` `ema_rsi` | `ai` | Stratégie de trading |
+| `--broker` | `binance` `alpaca` | `binance` | Broker d'exécution |
+| `--strategy` | `ai` `ema_rsi` `advanced` | `ema_rsi` | Stratégie de trading |
 | `--symbols` | liste | selon broker | Instruments à trader |
 | `--timeframe` | `1m` `5m` `15m` `30m` `1h` `4h` `1d` | `1h` | Unité de temps |
 | `--env` | `paper` `live` | `paper` | Mode paper ou réel |
@@ -205,6 +242,8 @@ Basée uniquement sur les indicateurs techniques. Recommandée pour débuter ou 
 **Signal BUY :** prix > EMA20 > EMA50 > EMA200 + RSI ∈ [45–65] + MACD histogramme > 0 + volume > moyenne 20 bougies
 
 **Signal SELL :** prix < EMA20 < EMA50 < EMA200 + RSI ∈ [35–55] + MACD histogramme < 0 + volume > moyenne
+
+---
 
 ### `ai` — Stratégie IA complète (4 couches)
 
@@ -225,9 +264,74 @@ Inconnu           →  35%   40%     15%      10%
 
 ---
 
-## Entraînement des modèles IA
+### `advanced` — Price Action + Smart Money Concepts
 
-L'entraînement utilise des données historiques Binance et intègre automatiquement des mécanismes anti-overfitting.
+Pipeline de génération de signal en 8 étapes :
+
+1. **MarketStructure** — détection de tendance, Break of Structure (BOS), Change of Character (CHOCH)
+2. **OrderBlocks** — zones institutionnelles actives (bullish/bearish)
+3. **FVGDetector** — Fair Value Gaps (déséquilibres de prix non comblés)
+4. **OTEEvaluator** — Optimal Trade Entry (retracement Fibonacci 61,8 %–78,6 % dans un OB)
+5. **CandlePatterns (IFC)** — confirmation : Pin Bar, Engulfing, Doji, Morning/Evening Star
+6. **LiquidityZones** — zones de concentration de stops (hauts/bas égaux)
+7. **StopHuntDetector** — détection de manipulation institutionnelle
+8. **MetaLabelingModel** — filtre probabilité de profit (PoP ≥ seuil configurable)
+
+**SL/TP structurels** basés sur les niveaux SMC (pas un multiple d'ATR fixe).
+
+> Le filtre `MacroFilter` s'applique en amont : aucun signal n'est émis pendant les blackouts macro (NFP, CPI, FOMC…).
+
+---
+
+## Modules d'analyse avancée
+
+### Price Action (`analysis/technical/price_action.py`)
+
+Analyse la structure du marché barre par barre :
+
+| Concept | Description |
+|---|---|
+| **Trend** | Haussier / Baissier / Laterale |
+| **BOS** | Break of Structure — confirmation de continuation |
+| **CHOCH** | Change of Character — signal potentiel de retournement |
+| **Swing High/Low** | Pivots significatifs pour délimiter la structure |
+
+### Smart Money Concepts (`analysis/technical/smc.py`)
+
+| Module | Description |
+|---|---|
+| `OrderBlockDetector` | Dernière bougie opposée avant un mouvement impulsionnel |
+| `FVGDetector` | Gap de prix sur 3 bougies (déséquilibre non comblé) |
+| `LiquidityZoneDetector` | Clusters de hauts/bas égaux (zones stop) |
+| `StopHuntDetector` | Pics de volume autour des niveaux ronds / swings |
+
+### Optimal Trade Entry (`analysis/technical/ote.py`)
+
+Évalue si le prix se trouve dans la zone OTE (retracement de 61,8 %–78,6 % de Fibonacci) à l'intérieur d'un Order Block actif.
+
+### IFC — Confirmation bougies (`analysis/technical/ifc.py`)
+
+Patterns détectés : Pin Bar, Bullish/Bearish Engulfing, Doji, Morning Star, Evening Star, Hammer, Shooting Star.
+
+### MacroFilter (`analysis/sentiment/macro_filter.py`)
+
+Bloque l'émission de signaux pendant les fenêtres de blackout autour des événements macro à fort impact :
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `blackout_before_min` | 30 min | Fenêtre avant l'événement |
+| `blackout_after_min` | 15 min | Fenêtre après l'événement |
+| `min_impact` | High | Seuil d'impact minimal |
+| `vol_mult_medium` | 1.3× | Multiplicateur ATR (Medium) |
+| `vol_mult_high` | 2.0× | Multiplicateur ATR (High) |
+
+### Meta-Labeling (`models/meta_labeling.py`)
+
+Modèle secondaire (XGBoost/RandomForest) qui filtre les signaux de la stratégie primaire. Ne trade que si la probabilité de profit estimée (PoP) dépasse le seuil configuré, réduisant les faux positifs.
+
+---
+
+## Entraînement des modèles IA
 
 ### Entraînement standard
 
@@ -267,17 +371,6 @@ python main.py train --symbol BTC/USDT --model rl --rl-steps 1000000
 6. Génération des labels (forward return +3 bougies)
 7. Entraînement TFT (50 epochs) + RL Agent (500k timesteps)
 8. Sauvegarde dans `models/saved/`
-
-### Charger les modèles dans la stratégie
-
-Via l'interface de configuration (onglet "Stratégie & Modèles"), ou dans le code :
-
-```python
-strategy.load_models(
-    tft_path="models/saved/tft_BTC_USDT.pt",
-    rl_path="models/saved/rl_BTC_USDT",
-)
-```
 
 ---
 
@@ -324,9 +417,9 @@ Un **score de résilience global** est calculé : proportion de scénarios où l
 python main.py dashboard
 ```
 
-Ouvre une interface Streamlit dans le navigateur avec deux pages :
+Interface Streamlit avec deux pages :
 
-- **Dashboard** — courbe d'équité, derniers trades, métriques de performance (Sharpe, Sortino, Win Rate…)
+- **Dashboard** — courbe d'équité, derniers trades, métriques (Sharpe, Sortino, Win Rate…)
 - **Configuration** — interface graphique pour modifier toutes les variables `.env` sans éditer de fichier
 
 ---
@@ -339,13 +432,40 @@ Chaque signal passe par le `RiskManager` avant exécution :
 |---|---|
 | Confiance minimale du signal | ≥ 30% |
 | Positions simultanées max | 5 |
-| Stop Loss dynamique | `prix − ATR × 2.0` |
-| Take Profit dynamique | `prix + ATR × 3.0` |
+| Stop Loss dynamique | `prix − ATR × 2.0` (ou SL structurel SMC) |
+| Take Profit dynamique | `prix + ATR × 3.0` (ou TP structurel SMC) |
 | **Circuit breaker — drawdown** | > 10% → arrêt total |
 | **Circuit breaker — perte journalière** | > 3% → pause du jour |
 | **Pertes consécutives** | > 5 → pause automatique |
+| **Blackout macro** | avant/après événements High → aucun signal |
 
 Le circuit breaker se réinitialise automatiquement le lendemain (perte journalière) ou manuellement via l'interface.
+
+---
+
+## Tests
+
+```bash
+# Tests unitaires (117 tests)
+.venv/Scripts/python.exe -m pytest tests/unit/ -v
+
+# Tests d'intégration
+.venv/Scripts/python.exe -m pytest tests/integration/ -v
+
+# Couverture complète
+.venv/Scripts/python.exe -m pytest tests/ --cov=. -v
+```
+
+| Suite | Fichier | Tests |
+|---|---|---|
+| Indicateurs techniques | `test_indicators.py` | ✓ |
+| Gestion du risque | `test_risk.py` | ✓ |
+| Stratégies | `test_strategies.py` | ✓ |
+| Stratégie avancée (PA/SMC/OTE/IFC) | `test_advanced_strategy.py` | 24 tests |
+| Filtre macro-économique | `test_macro_filter.py` | 30 tests |
+| Pipeline intégration | `test_pipeline.py` | ✓ |
+
+**Total : 117 tests — durée : ~12 s**
 
 ---
 
@@ -355,9 +475,6 @@ Le circuit breaker se réinitialise automatiquement le lendemain (perte journali
 |---|---|---|---|
 | **Binance** | Crypto spot | Testnet Binance | API Binance |
 | **Alpaca** | Actions US, ETF | Paper API | Live API |
-| **MetaTrader 5** | Forex, CFD, Indices, Crypto | Compte démo broker | Compte live broker |
-
-> MetaTrader 5 nécessite Windows et le terminal MT5 démarré localement.
 
 ---
 
